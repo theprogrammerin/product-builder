@@ -2,10 +2,11 @@
 
 ## Purpose
 
-Not code — the opinionated brain the future Codegen Agent must consult
-and follow when generating an app. Nothing currently reads this
-programmatically; it's authored now so Phase 1 has a concrete spec to
-build against.
+The opinionated brain: locked versions, codegen guidelines, and — as of
+[project scaffolding](../../designs/project-scaffolding.md) — the actual
+starting file structure copied into every new project. `versions.yaml`
+and `guidelines/` are still not consumed programmatically (that's Phase
+1's Codegen Agent); `template/` is, by `packages/orchestrator/src/scaffold.ts`.
 
 ## Key files
 
@@ -21,6 +22,12 @@ build against.
   - [`frontend-architecture.md`](../../../stack-spec/guidelines/frontend-architecture.md) — navigation/state/component-library picks
   - [`error-handling.md`](../../../stack-spec/guidelines/error-handling.md) — exception → status/code mapping
   - [`testing.md`](../../../stack-spec/guidelines/testing.md) — what "done" means for a generation run
+- [`template/`](../../../stack-spec/template) — the structural skeleton
+  copied verbatim into every new project by `scaffoldProject()`:
+  `backend/`, `frontend/`, `docker-compose.yml`, plus a full copy of this
+  repo's own governance loop (`CLAUDE.md`, `docs/backlog.md`,
+  `docs/blueprints/`, `docs/designs/TEMPLATE.md`, `CHANGELOG.md`) scoped
+  to that project. See [`template/README.md`](../../../stack-spec/template/README.md).
 
 ## Locked stack (generated apps)
 
@@ -31,5 +38,9 @@ Full detail and exact version pins: [`versions.yaml`](../../../stack-spec/versio
 
 ## Known limitations
 
-- Not yet consumed by any running code — Phase 1's Codegen Agent is what
-  will load and enforce these guidelines.
+- `versions.yaml`/`guidelines/` are not yet consumed by any running
+  code — Phase 1's Codegen Agent is what will load and enforce them.
+- `template/`'s `backend/`/`frontend/` are a structural skeleton only —
+  not `bundle install`ed or `npm install`ed, not yet a runnable app.
+- The template is static: editing it only affects *future* projects, not
+  ones already scaffolded.

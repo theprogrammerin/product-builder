@@ -1,0 +1,21 @@
+source "https://rubygems.org"
+
+ruby "~> 3.3"
+
+# Structural skeleton only — not yet bundled/installed. Exact versions
+# must match ../../versions.yaml at bundle-install time (Phase 1).
+gem "rails", "~> 7.1"
+gem "mysql2"
+gem "mongoid", "~> 8.0" # confirm compatibility with Rails 7.1 / MongoDB 7.0 in ../../versions.yaml
+gem "redis"
+gem "sidekiq", "~> 7.0"
+gem "devise"
+gem "devise-jwt"
+gem "blueprinter"
+gem "pundit"
+gem "kaminari"
+
+group :development, :test do
+  gem "rspec-rails"
+  gem "factory_bot_rails"
+end

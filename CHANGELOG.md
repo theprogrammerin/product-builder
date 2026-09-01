@@ -7,6 +7,21 @@ together.
 
 ## Unreleased
 
+### Phase 0.75 — Project scaffolding (feature request #1)
+
+- Add `stack-spec/template/`: a structural-skeleton project (backend +
+  frontend + `docker-compose.yml`) matching the locked stack, plus a full
+  copy of this repo's own governance loop (`CLAUDE.md`, `docs/backlog.md`,
+  `docs/blueprints/`, `docs/designs/TEMPLATE.md`, `CHANGELOG.md`) so any
+  agent or human building features into a generated project follows the
+  same discipline there. (`stack-spec/template/`)
+- Add `packages/orchestrator/src/scaffold.ts`: copies the template into
+  `<PROJECT_FILES_DIR>/<projectId>/` on project creation — deterministic,
+  no LLM call. `POST /api/projects` now returns a `workspacePath` and
+  500s with `scaffold_failed` (storing nothing) if the copy fails.
+  (`packages/orchestrator/src/scaffold.ts`, `app.ts`, `projectStore.ts`)
+- Design record: [`docs/designs/project-scaffolding.md`](docs/designs/project-scaffolding.md)
+
 ### Phase 0.5 — Basic chat vertical slice
 
 - Add project tracking: create/select a project, track its stage through

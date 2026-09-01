@@ -7,12 +7,12 @@ piece works, see the per-component docs under
 
 ## Opinionated stack for generated apps
 
-A locked set of libraries/versions and codegen guidelines that future
-agents must follow. Not yet consumed by any running code — this is the
-spec Phase 1's Codegen Agent will build against.
+A locked set of libraries/versions, codegen guidelines, and a starting
+structural skeleton that every project is built from.
 
 - Locked versions: [`stack-spec/versions.yaml`](../../stack-spec/versions.yaml)
 - Decision guidelines (one file per topic): [`stack-spec/guidelines/`](../../stack-spec/guidelines/)
+- Starting skeleton, copied into every new project: [`stack-spec/template/`](../../stack-spec/template/)
 - Details: [component blueprint](./components/stack-spec.md)
 
 ## Configurable LLM connectivity
@@ -32,6 +32,19 @@ Create or select a project and track its stage through a fixed pipeline:
 - API: `GET/POST /api/projects`, `PATCH /api/projects/:id/stage` — [`projectStore.ts`](../../packages/orchestrator/src/projectStore.ts), [`app.ts`](../../packages/orchestrator/src/app.ts)
 - UI: project dropdown, "+ New project" inline form, stage selector — [`App.tsx`](../../packages/web/src/App.tsx)
 - Stage changes are manual today — nothing yet infers or advances a stage automatically.
+
+## Project scaffolding
+
+Creating a project also provisions a real starting codebase for it on
+disk, copied verbatim from [`stack-spec/template/`](../../stack-spec/template/)
+— deterministic, no LLM call. Every project starts byte-identical,
+including its own copy of the same backlog/blueprint/design-doc/changelog
+governance loop this repo follows, scoped to that project. Project
+creation fails outright (`500 scaffold_failed`) if the copy fails.
+
+- API: `POST /api/projects` now returns a `workspacePath`, and 500s on scaffold failure — [`scaffold.ts`](../../packages/orchestrator/src/scaffold.ts), [`app.ts`](../../packages/orchestrator/src/app.ts)
+- Config: `PROJECT_FILES_DIR` (default `./generated-projects`)
+- Not yet a runnable app — see [`stack-spec` blueprint](./components/stack-spec.md); making it one is Phase 1.
 
 ## Chat, scoped per project
 

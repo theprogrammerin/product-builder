@@ -1,0 +1,43 @@
+# Structural placeholder — see backend/Dockerfile. Bringing this stack up
+# for real (bundle installed image, migrations run) is Phase 1 work.
+services:
+  rails:
+    build: ./backend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - mysql
+      - mongo
+      - redis
+    environment:
+      MYSQL_HOST: mysql
+      MONGO_URI: mongodb://mongo:27017/app_development
+
+  sidekiq:
+    build: ./backend
+    command: ["bundle", "exec", "sidekiq"]
+    depends_on:
+      - redis
+      - mysql
+      - mongo
+    environment:
+      MYSQL_HOST: mysql
+      MONGO_URI: mongodb://mongo:27017/app_development
+
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+      MYSQL_DATABASE: app_development
+    ports:
+      - "3306:3306"
+
+  mongo:
+    image: mongo:7.0
+    ports:
+      - "27017:27017"
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"

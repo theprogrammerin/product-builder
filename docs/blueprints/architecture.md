@@ -5,7 +5,7 @@ target architecture it's being built toward. Per-component detail lives
 under [`components/`](./components/); current capabilities are inventoried
 in [`features.md`](./features.md).
 
-## Current implementation (Phase 0 / 0.5)
+## Current implementation (Phase 0 / 0.5 / 0.75)
 
 ```mermaid
 flowchart LR
@@ -13,26 +13,30 @@ flowchart LR
     Web -->|"/api/* (Vite dev proxy)"| Orchestrator["packages/orchestrator<br/>Express API"]
     Orchestrator -->|"chat()"| LLMClient["packages/llm-client<br/>GlmClient"]
     LLMClient -->|HTTPS| GLM[("Configured GLM endpoint")]
-    Orchestrator -.->|"reads (not yet)"| StackSpec["stack-spec/"]
+    Orchestrator -->|"copies on project creation"| StackSpec["stack-spec/template/"]
+    StackSpec -->|scaffolds| Workspace[("generated-projects/&lt;id&gt;/")]
 ```
 
 - **[`packages/web`](../../packages/web)** — single-page chat UI: project
   selector, "new project" form, stage selector, message thread. Talks only
   to the orchestrator's `/api/*` routes. → [blueprint](./components/web.md)
 - **[`packages/orchestrator`](../../packages/orchestrator)** — Express
-  service holding the project registry and chat, both in-memory today.
+  service holding the project registry and chat (in-memory), plus
+  on-disk scaffolding of each new project from `stack-spec/template/`.
   This is the seam where the future Intake/Codegen agents attach.
   → [blueprint](./components/orchestrator.md)
 - **[`packages/llm-client`](../../packages/llm-client)** —
   provider-agnostic `LLMClient` interface with one implementation,
   `GlmClient`, for any GLM-API-compatible endpoint.
   → [blueprint](./components/llm-client.md)
-- **[`stack-spec/`](../../stack-spec)** — data, not code: locked versions
-  and guidelines the future Codegen Agent must follow.
-  → [blueprint](./components/stack-spec.md)
+- **[`stack-spec/`](../../stack-spec)** — locked versions/guidelines
+  (not yet consumed programmatically) plus `template/`, the structural
+  skeleton copied into every new project (consumed by the orchestrator
+  today). → [blueprint](./components/stack-spec.md)
 
-Nothing here generates an app yet — chat is a direct passthrough to GLM
-with a static system prompt.
+Chat itself is still a direct passthrough to GLM with a static system
+prompt — no app-generation logic runs yet. What *is* real: every project
+gets an identical starting codebase on disk the moment it's created.
 
 ## Target architecture
 

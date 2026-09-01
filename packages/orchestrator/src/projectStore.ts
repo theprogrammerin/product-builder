@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 export const PROJECT_STAGES = [
   "ideation",
   "product_requirements",
@@ -16,6 +14,15 @@ export interface Project {
   name: string;
   stage: ProjectStage;
   createdAt: string;
+  /** Absolute path to this project's scaffolded codebase on disk. */
+  workspacePath: string;
+}
+
+export interface CreateProjectInput {
+  /** Pre-generated so it can be used to name the scaffold directory before the project is stored. */
+  id: string;
+  name: string;
+  workspacePath: string;
 }
 
 export function isProjectStage(value: unknown): value is ProjectStage {
@@ -25,13 +32,17 @@ export function isProjectStage(value: unknown): value is ProjectStage {
 export interface ProjectStore {
   list(): Project[];
   get(id: string): Project | undefined;
-  create(name: string): Project;
+  create(input: CreateProjectInput): Project;
   updateStage(id: string, stage: ProjectStage): Project | undefined;
 }
 
 /**
  * In-memory project registry — same rationale as chatStore.ts: this is the
  * Phase 0.5 vertical slice, not the real Orchestrator with persistence.
+ *
+ * A project is only ever inserted here after its workspace has already
+ * been scaffolded on disk (see scaffold.ts) — there is no "project
+ * without a workspace" state to represent.
  */
 export function createInMemoryProjectStore(): ProjectStore {
   const projects = new Map<string, Project>();
@@ -43,12 +54,13 @@ export function createInMemoryProjectStore(): ProjectStore {
     get(id) {
       return projects.get(id);
     },
-    create(name) {
+    create({ id, name, workspacePath }) {
       const project: Project = {
-        id: randomUUID(),
+        id,
         name,
         stage: PROJECT_STAGES[0],
         createdAt: new Date().toISOString(),
+        workspacePath,
       };
       projects.set(project.id, project);
       return project;

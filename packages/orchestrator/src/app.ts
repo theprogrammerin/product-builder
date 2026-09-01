@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import express, { type Express } from "express";
 import type { ChatMessage, LLMClient } from "@app-builder/llm-client";
 import { createInMemoryStore, type ChatSessionStore } from "./chatStore.js";
@@ -6,6 +7,12 @@ import {
   isProjectStage,
   type ProjectStore,
 } from "./projectStore.js";
+import { loadScaffoldConfig, scaffoldProject } from "./scaffold.js";
+
+export type Scaffold = (projectId: string) => Promise<string>;
+
+const defaultScaffold: Scaffold = (projectId) =>
+  scaffoldProject(projectId, loadScaffoldConfig());
 
 const SYSTEM_PROMPT =
   "You are the chat assistant for an app-builder tool that is still under " +
@@ -22,6 +29,7 @@ export function createApp(
   healthInfo: HealthInfo,
   chatStore: ChatSessionStore = createInMemoryStore(),
   projectStore: ProjectStore = createInMemoryProjectStore(),
+  scaffold: Scaffold = defaultScaffold,
 ): Express {
   const app = express();
   app.use(express.json());
@@ -37,7 +45,7 @@ export function createApp(
     res.json({ projects: projectStore.list() });
   });
 
-  app.post("/api/projects", (req, res) => {
+  app.post("/api/projects", async (req, res) => {
     const { name } = req.body ?? {};
     if (typeof name !== "string" || name.trim().length === 0) {
       res
@@ -45,8 +53,20 @@ export function createApp(
         .json({ error: { code: "bad_request", message: "name is required" } });
       return;
     }
-    const project = projectStore.create(name.trim());
-    res.status(201).json({ project });
+
+    const id = randomUUID();
+    try {
+      const workspacePath = await scaffold(id);
+      const project = projectStore.create({ id, name: name.trim(), workspacePath });
+      res.status(201).json({ project });
+    } catch (error) {
+      res.status(500).json({
+        error: {
+          code: "scaffold_failed",
+          message: error instanceof Error ? error.message : "Failed to scaffold project",
+        },
+      });
+    }
   });
 
   app.patch("/api/projects/:id/stage", (req, res) => {

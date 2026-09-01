@@ -1,0 +1,14 @@
+development:
+  clients:
+    default:
+      uri: <%= ENV.fetch("MONGO_URI", "mongodb://mongo:27017/app_development") %>
+
+test:
+  clients:
+    default:
+      uri: <%= ENV.fetch("MONGO_URI", "mongodb://mongo:27017/app_test") %>
+
+production:
+  clients:
+    default:
+      uri: <%= ENV.fetch("MONGO_URI", "mongodb://mongo:27017/app_production") %>

@@ -5,3 +5,7 @@ dist/
 .env.local
 .DS_Store
 coverage/
+
+# Per-project scaffolded output (packages/orchestrator/src/scaffold.ts) —
+# generated at runtime, never committed to this meta-repo.
+generated-projects/
