@@ -1,0 +1,37 @@
+# Locked stack versions for all generated apps.
+#
+# The Codegen Agent MUST use exactly these versions. It must not upgrade,
+# downgrade, or substitute a library/engine listed here based on its own
+# judgment. If a spec requires something not covered here, that's a gap in
+# this file to raise, not a decision for the agent to make silently.
+
+backend:
+  language: "Ruby 3.3.x"
+  framework: "Rails 7.1.x (API-only mode: --api)"
+  relational_db: "MySQL 8.0.x"
+  document_db: "MongoDB 7.0.x"
+  mongo_odm: "Mongoid (latest compatible with Rails 7.1 / Mongo 7.0)"
+  cache_and_queue_broker: "Redis 7.x"
+  background_jobs: "Sidekiq (latest 7.x)"
+  auth: "Devise + devise-jwt (API mode)"
+  serialization: "Blueprinter"
+  testing: "RSpec + FactoryBot"
+
+frontend:
+  language: "TypeScript"
+  framework: "React Native via Expo (latest stable SDK at project start, pinned in each generated app's package.json)"
+  navigation: "React Navigation"
+  state_management: "Zustand"
+  component_library: "React Native Paper"
+  testing: "Jest + React Native Testing Library"
+
+infra:
+  containerization: "Docker"
+  local_orchestration: "docker-compose"
+  cloud_targets: "deferred past v1 (no Terraform/CDK yet)"
+
+builder_platform:
+  # The app-builder product itself (Intake Agent, Codegen Agent,
+  # Orchestrator) — not the stack it generates.
+  language: "TypeScript / Node.js (>=20)"
+  llm_provider: "GLM (OpenAI-compatible chat-completions API), endpoint configurable — see packages/llm-client"

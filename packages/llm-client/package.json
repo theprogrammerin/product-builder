@@ -1,0 +1,22 @@
+{
+  "name": "@app-builder/llm-client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "smoke": "tsx scripts/smoke.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.11",
+    "tsx": "^4.19.0",
+    "@types/node": "^22.7.0"
+  }
+}
