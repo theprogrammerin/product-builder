@@ -1,25 +1,29 @@
 import type { ChatMessage } from "@app-builder/llm-client";
 
+/**
+ * Async throughout — the Postgres-backed implementation needs it. See
+ * postgresChatStore.ts.
+ */
 export interface ChatSessionStore {
-  get(sessionId: string): ChatMessage[];
-  append(sessionId: string, messages: ChatMessage[]): void;
+  get(projectId: string): Promise<ChatMessage[]>;
+  append(projectId: string, messages: ChatMessage[]): Promise<void>;
 }
 
 /**
- * Per-process, per-session conversation history. Deliberately not
- * persisted — this is the Phase 0.5 vertical slice, not the real
- * Orchestrator; a restart losing in-progress chats is acceptable here.
+ * Per-process conversation history. Used by default in tests for speed
+ * and isolation; the orchestrator itself defaults to the Postgres-backed
+ * store (see postgresChatStore.ts) so history survives a restart.
  */
 export function createInMemoryStore(): ChatSessionStore {
   const sessions = new Map<string, ChatMessage[]>();
 
   return {
-    get(sessionId) {
-      return sessions.get(sessionId) ?? [];
+    async get(projectId) {
+      return sessions.get(projectId) ?? [];
     },
-    append(sessionId, messages) {
-      const existing = sessions.get(sessionId) ?? [];
-      sessions.set(sessionId, [...existing, ...messages]);
+    async append(projectId, messages) {
+      const existing = sessions.get(projectId) ?? [];
+      sessions.set(projectId, [...existing, ...messages]);
     },
   };
 }

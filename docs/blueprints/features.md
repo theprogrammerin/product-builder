@@ -44,16 +44,39 @@ creation fails outright (`500 scaffold_failed`) if the copy fails.
 
 - API: `POST /api/projects` now returns a `workspacePath`, and 500s on scaffold failure — [`scaffold.ts`](../../packages/orchestrator/src/scaffold.ts), [`app.ts`](../../packages/orchestrator/src/app.ts)
 - Config: `PROJECT_FILES_DIR` (default `./generated-projects`)
-- Not yet a runnable app — see [`stack-spec` blueprint](./components/stack-spec.md); making it one is Phase 1.
+- The backend half is a real `rails new --api` skeleton (bundle install
+  still required); the frontend half is still a bare structural skeleton
+  — see [`stack-spec` blueprint](./components/stack-spec.md).
 
-## Chat, scoped per project
+## Codegen Agent (CLI) — proven on one CRUD resource
+
+Given an already-scaffolded project and a hand-written build spec (e.g.
+`{ "resource": "Task", "fields": [...] }`), an LLM tool-calling loop
+writes and *actually runs* real Rails backend code — inside Docker —
+until `bundle exec rspec` genuinely passes. First proven end-to-end
+2026-09-02: model, migration, Blueprinter serializer, namespaced
+controller with pagination, request + model specs — 21 examples, 0
+failures, independently following this repo's own `error-handling.md`/
+`api-conventions.md` guidelines.
+
+- CLI: `codegen-agent --workspace <path> --spec <path>` — [component blueprint](./components/codegen-agent.md)
+- CLI-only — no web UI or orchestrator integration yet; a developer runs
+  it by hand against a project's `workspacePath`
+- Scope: single resource, backend only — no auth, MongoDB, Sidekiq, or
+  frontend generation yet
+- The model's own "done" is never trusted — a final `bundle exec rspec`
+  run is what actually certifies success, every time
+
+## Chat, scoped per project — persisted
 
 Send a message to a selected project; the orchestrator keeps that
-project's conversation history and replays it as context on every turn.
+project's conversation history in Postgres and replays it as context on
+every turn. Selecting a project in the UI loads its real past
+conversation, including after an orchestrator restart or a page reload.
 
-- API: `POST /api/chat` (`{ projectId, message }` → `{ reply, finishReason }`, 404 on an unknown project) — [`app.ts`](../../packages/orchestrator/src/app.ts)
-- UI: single-page chat log + input — [`App.tsx`](../../packages/web/src/App.tsx)
-- History is in-memory only (per orchestrator process) — lost on restart.
+- API: `POST /api/chat` (`{ projectId, message }` → `{ reply, finishReason }`, 404 on an unknown project); `GET /api/projects/:id/messages` returns the persisted history — [`app.ts`](../../packages/orchestrator/src/app.ts)
+- Storage: Postgres, via `postgresChatStore.ts`/`postgresProjectStore.ts` — both projects and chat history survive a restart
+- UI: single-page chat log + input, fetches history on project selection — [`App.tsx`](../../packages/web/src/App.tsx)
 - No app-generation logic behind it yet — messages go straight to the
   configured GLM model with a static system prompt.
 
@@ -65,8 +88,9 @@ project's conversation history and replays it as context on every turn.
 ## Not yet built
 
 - Intake Agent (free-text description → structured build spec)
-- Codegen Agent (sandboxed, feature-complete app generation)
-- Persistence beyond in-memory (a restart loses all projects/chat history)
+- Codegen Agent beyond a single resource: auth, MongoDB, Sidekiq,
+  frontend generation, multi-resource specs
+- Wiring the Codegen Agent into the orchestrator/web UI (still CLI-only)
 - Accounts/auth, streaming progress, delivery (git push/zip), cloud IaC
 
 See the [backlog](../backlog.md) for sequencing, and

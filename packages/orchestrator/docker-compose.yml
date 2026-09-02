@@ -1,0 +1,17 @@
+# Local Postgres for the orchestrator's own persistence (projects + chat
+# history) — unrelated to stack-spec/template/docker-compose.yml, which
+# is the locked stack for *generated* apps, not this builder tool.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: app_builder
+      POSTGRES_PASSWORD: app_builder
+      POSTGRES_DB: app_builder
+    ports:
+      - "5432:5432"
+    volumes:
+      - orchestrator_pgdata:/var/lib/postgresql/data
+
+volumes:
+  orchestrator_pgdata:

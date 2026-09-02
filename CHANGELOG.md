@@ -7,6 +7,56 @@ together.
 
 ## Unreleased
 
+### Phase 1, Milestone 1 — Codegen Agent passes end-to-end (feature requests #2, #4)
+
+First working slice of the Codegen Agent: given a scaffolded project and
+a hand-written build spec, it writes and actually runs Rails backend code
+until `bundle exec rspec` genuinely passes. Proven 2026-09-02 on a `Task`
+CRUD resource — 21 examples, 0 failures — after 5 real runs, each fixing
+a genuine bug:
+
+- Add `packages/codegen-agent`: CLI, tool-calling loop, Docker-based
+  execution (`docker compose run --rm rails <command>`), and a system
+  prompt built from `stack-spec/versions.yaml` + `guidelines/*.md`.
+- Add `list_files` (recursive) and `search_files` (grep-style regex)
+  tools alongside `read_file`/`write_file`/`list_dir`/`run_command`, to
+  cut down exploration iterations (feature request #4).
+- Fix: the loop no longer treats an empty/no-tool-call response as "done"
+  (run 1); generous `maxTokens` (4096), since this model spends tokens on
+  hidden reasoning before visible output.
+- Fix: `stack-spec/template/backend/Dockerfile` bakes in
+  `build-essential`/`pkg-config`/`default-libmysqlclient-dev`/`git` at
+  build time; `docker-compose.yml` adds a persistent `bundle_cache`
+  volume — `docker compose run --rm`'s ephemeral containers meant nothing
+  installed ad hoc via `run_command` ever persisted to the next command
+  (run 1-2).
+- Fix: dropped host port publishing from `docker-compose.yml` entirely —
+  fixed host ports meant two projects' stacks could never run
+  concurrently, or after a prior run's containers were left up (run 2);
+  the CLI now also runs `docker compose down` after every run.
+- **Biggest change**: `stack-spec/template/backend/` is now a real
+  `rails new --api` + `rails generate rspec:install` output (generated
+  inside the exact runtime image, with locked gems restored and
+  `config.generators.orm = :active_record` set explicitly — Mongoid's
+  presence otherwise hijacks `rails generate model` to default to
+  Mongoid instead of MySQL/ActiveRecord). Removed most boilerplate/setup
+  work from every future run's iteration budget (run 3).
+- Design record: [`docs/designs/codegen-agent-milestone-1.md`](docs/designs/codegen-agent-milestone-1.md)
+
+### Chat history persistence (feature request #3)
+
+- Move the orchestrator's projects and chat history from in-memory Maps
+  to Postgres: new `packages/orchestrator/docker-compose.yml` (local
+  Postgres), `src/db.ts` (pool + schema init), and
+  `postgresProjectStore.ts`/`postgresChatStore.ts` implementing the
+  existing `ProjectStore`/`ChatSessionStore` interfaces (now async).
+  Projects and chat both survive an orchestrator restart.
+- Add `GET /api/projects/:id/messages`; the web UI fetches a project's
+  real history the first time it's selected instead of only showing
+  messages sent since the page loaded. (`packages/orchestrator/src/app.ts`,
+  `packages/web/src/App.tsx`)
+- Design record: [`docs/designs/chat-history-persistence.md`](docs/designs/chat-history-persistence.md)
+
 ### Phase 0.75 — Project scaffolding (feature request #1)
 
 - Add `stack-spec/template/`: a structural-skeleton project (backend +

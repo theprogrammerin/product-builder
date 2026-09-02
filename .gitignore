@@ -9,3 +9,6 @@ coverage/
 # Per-project scaffolded output (packages/orchestrator/src/scaffold.ts) —
 # generated at runtime, never committed to this meta-repo.
 generated-projects/
+
+# Local Claude Code session state, not project content.
+.claude/

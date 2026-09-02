@@ -31,6 +31,11 @@ interface Message {
   content: string;
 }
 
+interface ServerMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string | null;
+}
+
 const NEW_PROJECT_OPTION = "__new__";
 
 function App() {
@@ -40,6 +45,7 @@ function App() {
   const [newProjectName, setNewProjectName] = useState("");
 
   const [messagesByProject, setMessagesByProject] = useState<Record<string, Message[]>>({});
+  const [loadedHistoryFor, setLoadedHistoryFor] = useState<Set<string>>(new Set());
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -55,6 +61,27 @@ function App() {
         setLoadError(error instanceof Error ? error.message : "Failed to load projects");
       });
   }, []);
+
+  // Load a project's persisted history the first time it's selected —
+  // messages sent afterward are tracked locally via appendMessage, since
+  // they're already reflected in what was just sent/received.
+  useEffect(() => {
+    if (!selectedProjectId || loadedHistoryFor.has(selectedProjectId)) return;
+    const projectId = selectedProjectId;
+
+    fetch(`/api/projects/${projectId}/messages`)
+      .then((res) => res.json())
+      .then((body: { messages: ServerMessage[] }) => {
+        const history: Message[] = body.messages
+          .filter((m) => m.role === "user" || m.role === "assistant")
+          .map((m) => ({ role: m.role as "user" | "assistant", content: m.content ?? "" }));
+        setMessagesByProject((prev) => ({ ...prev, [projectId]: history }));
+        setLoadedHistoryFor((prev) => new Set(prev).add(projectId));
+      })
+      .catch((error) => {
+        setLoadError(error instanceof Error ? error.message : "Failed to load chat history");
+      });
+  }, [selectedProjectId, loadedHistoryFor]);
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId) ?? null;
   const messages = selectedProjectId ? (messagesByProject[selectedProjectId] ?? []) : [];
@@ -91,6 +118,8 @@ function App() {
 
       const project = body.project as Project;
       setProjects((prev) => [...prev, project]);
+      setMessagesByProject((prev) => ({ ...prev, [project.id]: [] }));
+      setLoadedHistoryFor((prev) => new Set(prev).add(project.id));
       setSelectedProjectId(project.id);
       setIsCreatingProject(false);
       setNewProjectName("");

@@ -21,16 +21,19 @@ own UI.
 - Plain React `useState` — no state-management library. One page, kept
   deliberately simple; this is not subject to the Zustand pick locked for
   *generated* apps (see [`stack-spec` blueprint](./stack-spec.md)).
-- `messagesByProject`: a client-side mirror of conversation history, keyed
-  by project id, so switching projects doesn't require a fetch — the
-  orchestrator has no "get history" endpoint yet.
+- `messagesByProject`: a client-side cache of conversation history, keyed
+  by project id. The first time a project is selected, its history is
+  fetched from `GET /api/projects/:id/messages` (persisted in Postgres)
+  and used to seed the cache; messages sent afterward are appended
+  locally rather than re-fetched.
 
 ## Known limitations
 
 - No routing (single page).
 - No automated tests yet.
-- Refreshing the page loses the local `messagesByProject` mirror; there's
-  no endpoint yet to re-fetch a project's history from the orchestrator.
+- History is fetched once per project per page load (tracked via
+  `loadedHistoryFor`) — a message added by another client/tab wouldn't
+  appear without a full reload.
 
 ## Running it
 
@@ -38,7 +41,8 @@ own UI.
 npm run dev --workspace @app-builder/web   # http://localhost:5173
 ```
 
-Requires the orchestrator running on port 4000:
+Requires the orchestrator running on port 4000, which in turn needs its
+Postgres up (`docker compose up -d` in `packages/orchestrator`):
 
 ```bash
 npm run dev --workspace @app-builder/orchestrator

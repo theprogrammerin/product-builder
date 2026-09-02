@@ -41,8 +41,8 @@ export function createApp(
     });
   });
 
-  app.get("/api/projects", (_req, res) => {
-    res.json({ projects: projectStore.list() });
+  app.get("/api/projects", async (_req, res) => {
+    res.json({ projects: await projectStore.list() });
   });
 
   app.post("/api/projects", async (req, res) => {
@@ -57,7 +57,7 @@ export function createApp(
     const id = randomUUID();
     try {
       const workspacePath = await scaffold(id);
-      const project = projectStore.create({ id, name: name.trim(), workspacePath });
+      const project = await projectStore.create({ id, name: name.trim(), workspacePath });
       res.status(201).json({ project });
     } catch (error) {
       res.status(500).json({
@@ -69,7 +69,7 @@ export function createApp(
     }
   });
 
-  app.patch("/api/projects/:id/stage", (req, res) => {
+  app.patch("/api/projects/:id/stage", async (req, res) => {
     const { stage } = req.body ?? {};
     if (!isProjectStage(stage)) {
       res
@@ -77,7 +77,7 @@ export function createApp(
         .json({ error: { code: "bad_request", message: "stage is invalid" } });
       return;
     }
-    const project = projectStore.updateStage(req.params.id, stage);
+    const project = await projectStore.updateStage(req.params.id, stage);
     if (!project) {
       res
         .status(404)
@@ -85,6 +85,17 @@ export function createApp(
       return;
     }
     res.json({ project });
+  });
+
+  app.get("/api/projects/:id/messages", async (req, res) => {
+    const project = await projectStore.get(req.params.id);
+    if (!project) {
+      res
+        .status(404)
+        .json({ error: { code: "not_found", message: "project not found" } });
+      return;
+    }
+    res.json({ messages: await chatStore.get(req.params.id) });
   });
 
   app.post("/api/chat", async (req, res) => {
@@ -96,7 +107,7 @@ export function createApp(
         .json({ error: { code: "bad_request", message: "projectId is required" } });
       return;
     }
-    if (!projectStore.get(projectId)) {
+    if (!(await projectStore.get(projectId))) {
       res
         .status(404)
         .json({ error: { code: "not_found", message: "project not found" } });
@@ -109,14 +120,14 @@ export function createApp(
       return;
     }
 
-    const history = chatStore.get(projectId);
+    const history = await chatStore.get(projectId);
     const userMessage: ChatMessage = { role: "user", content: message };
 
     try {
       const result = await llmClient.chat({
         messages: [{ role: "system", content: SYSTEM_PROMPT }, ...history, userMessage],
       });
-      chatStore.append(projectId, [userMessage, result.message]);
+      await chatStore.append(projectId, [userMessage, result.message]);
       res.json({ reply: result.message.content, finishReason: result.finishReason });
     } catch (error) {
       res.status(502).json({
