@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import express, { type Express } from "express";
-import type { ChatMessage, LLMClient } from "@app-builder/llm-client";
+import { withUsageReporting, type ChatMessage, type LLMClient, type Usage } from "@app-builder/llm-client";
 import {
   buildSystemPrompt as buildIntakeSystemPrompt,
   runIntake,
@@ -69,9 +69,24 @@ export type RunOutcome =
   | { kind: "live"; components: ComponentResult[] }
   | { kind: "failed"; error: string };
 
+/**
+ * Live, per-project LLM call status — powers the web UI's footer status
+ * display (feature #14, amending #13). Ephemeral, in-memory only, same
+ * lifetime as `buildingProjects` — not persisted across a restart.
+ */
+export interface ProgressSnapshot {
+  agentLabel: string;
+  totalSentTokens: number;
+  totalReceivedTokens: number;
+  /** epoch ms; null once the in-flight call's usage has been recorded (or before the first call). */
+  callStartedAt: number | null;
+}
+
 export type RunIntakePhase = (params: {
   description: string;
   llmClient: LLMClient;
+  onCallStart: () => void;
+  onUsage: (usage: Usage) => void;
 }) => Promise<IntakeOutcome>;
 
 export type RunCodegenPhase = (params: {
@@ -81,6 +96,8 @@ export type RunCodegenPhase = (params: {
   runAgent: RunAgent;
   onProgress: (content: string) => void;
   onRunOutcome: (outcome: RunOutcome) => void;
+  onCallStart: () => void;
+  onUsage: (usage: Usage) => void;
 }) => Promise<CodegenOutcome>;
 
 export type DebugOutcome =
@@ -94,6 +111,8 @@ export type RunDebugPhase = (params: {
   llmClient: LLMClient;
   liveComponents?: LiveComponent[];
   onProgress: (content: string) => void;
+  onCallStart: () => void;
+  onUsage: (usage: Usage) => void;
 }) => Promise<DebugOutcome>;
 
 function formatComponentList(components: ComponentResult[]): string {
@@ -101,8 +120,9 @@ function formatComponentList(components: ComponentResult[]): string {
 }
 
 /** Thin wrapper around the Intake Agent — one fast LLM call, always awaited directly. */
-export const defaultRunIntakePhase: RunIntakePhase = async ({ description, llmClient }) => {
-  const result = await runIntake({ llmClient, systemPrompt: buildIntakeSystemPrompt(), description });
+export const defaultRunIntakePhase: RunIntakePhase = async ({ description, llmClient, onCallStart, onUsage }) => {
+  const wrappedClient = withUsageReporting(llmClient, { onCallStart, onUsage });
+  const result = await runIntake({ llmClient: wrappedClient, systemPrompt: buildIntakeSystemPrompt(), description });
   return { kind: result.kind, content: result.content };
 };
 
@@ -118,10 +138,14 @@ export const defaultRunCodegenPhase: RunCodegenPhase = async ({
   runAgent,
   onProgress,
   onRunOutcome,
+  onCallStart,
+  onUsage,
 }) => {
   const forward = (event: AgentEvent) => {
     if (event.type === "assistant_message" && event.content) onProgress(event.content);
   };
+  // See docs/designs/token-usage-reporting.md.
+  const wrappedClient = withUsageReporting(llmClient, { onCallStart, onUsage });
 
   const backendDocker = createDockerRunner(workspacePath, "rails");
   const frontendDocker = createDockerRunner(workspacePath, "frontend");
@@ -131,7 +155,7 @@ export const defaultRunCodegenPhase: RunCodegenPhase = async ({
 
   try {
     const backendResult = await runCodegenAgent({
-      llmClient,
+      llmClient: wrappedClient,
       systemPrompt: await buildCodegenSystemPrompt(),
       buildSpec,
       fileTools: createFileTools(path.join(workspacePath, "backend")),
@@ -153,7 +177,7 @@ export const defaultRunCodegenPhase: RunCodegenPhase = async ({
     // happen at the same time, not one after the other. See
     // docs/designs/run-deploy-agent.md.
     const loopResult = await runCodegenLoop({
-      llmClient,
+      llmClient: wrappedClient,
       systemPrompt: await buildFrontendSystemPrompt(),
       buildSpec,
       fileTools: createFileTools(path.join(workspacePath, "frontend")),
@@ -222,13 +246,25 @@ export const defaultRunDebugPhase: RunDebugPhase = async ({
   llmClient,
   liveComponents,
   onProgress,
+  onCallStart,
+  onUsage,
 }) => {
   const forward = (event: AgentEvent) => {
     if (event.type === "assistant_message" && event.content) onProgress(event.content);
   };
+  // Both of Debug Agent's internal passes (backend, frontend) share this
+  // client, so both accumulate into the same progress snapshot — see
+  // docs/designs/token-usage-reporting.md.
+  const wrappedClient = withUsageReporting(llmClient, { onCallStart, onUsage });
 
   try {
-    const result = await runDebugAgent({ llmClient, workspacePath, description, liveComponents, onEvent: forward });
+    const result = await runDebugAgent({
+      llmClient: wrappedClient,
+      workspacePath,
+      description,
+      liveComponents,
+      onEvent: forward,
+    });
     return result.fixed
       ? { kind: "done", content: `Debug complete — ${result.summary}` }
       : { kind: "failed", content: `Investigated, but tests still don't fully pass: ${result.summary}` };
@@ -268,6 +304,35 @@ export function createApp(
   // Guards manual /run and /stop against racing each other or a build's
   // own automatic Run Agent trigger for the same project.
   const runningOps = new Set<string>();
+  // Live per-project LLM call status, powering the web UI's footer status
+  // display — reset at the start of each phase invocation, not persisted.
+  // See docs/designs/token-usage-reporting.md's Amendment.
+  const progressByProject = new Map<string, ProgressSnapshot>();
+
+  function resetProgress(projectId: string, agentLabel: string) {
+    progressByProject.set(projectId, {
+      agentLabel,
+      totalSentTokens: 0,
+      totalReceivedTokens: 0,
+      callStartedAt: null,
+    });
+  }
+
+  function markCallStarted(projectId: string) {
+    const prev = progressByProject.get(projectId);
+    if (prev) progressByProject.set(projectId, { ...prev, callStartedAt: Date.now() });
+  }
+
+  function recordUsage(projectId: string, usage: Usage) {
+    const prev = progressByProject.get(projectId);
+    if (!prev) return;
+    progressByProject.set(projectId, {
+      ...prev,
+      totalSentTokens: prev.totalSentTokens + usage.promptTokens,
+      totalReceivedTokens: prev.totalReceivedTokens + usage.completionTokens,
+      callStartedAt: null,
+    });
+  }
 
   app.get("/api/health", (_req, res) => {
     res.json({
@@ -333,6 +398,17 @@ export function createApp(
     res.json({ messages: await chatStore.get(req.params.id) });
   });
 
+  app.get("/api/projects/:id/progress", async (req, res) => {
+    const project = await projectStore.get(req.params.id);
+    if (!project) {
+      res
+        .status(404)
+        .json({ error: { code: "not_found", message: "project not found" } });
+      return;
+    }
+    res.json({ progress: progressByProject.get(req.params.id) ?? null });
+  });
+
   app.post("/api/chat", async (req, res) => {
     const { projectId, message } = req.body ?? {};
 
@@ -390,7 +466,13 @@ export function createApp(
       // wait on a fire-and-forget promise for this part. See
       // docs/designs/frontend-generation.md.
       try {
-        const intakeResult = await runIntakePhase({ description, llmClient });
+        resetProgress(projectId, "Intake Agent");
+        const intakeResult = await runIntakePhase({
+          description,
+          llmClient,
+          onCallStart: () => markCallStarted(projectId),
+          onUsage: (usage) => recordUsage(projectId, usage),
+        });
         const reply: ChatMessage =
           intakeResult.kind === "question"
             ? { role: "assistant", content: `[build:question] ${intakeResult.content}` }
@@ -452,6 +534,7 @@ export function createApp(
       res.json({ reply: ack.content, finishReason: "stop" });
 
       buildingProjects.add(projectId);
+      resetProgress(projectId, "Codegen Agent");
       runCodegenPhase({
         workspacePath: project.workspacePath,
         buildSpec,
@@ -460,6 +543,8 @@ export function createApp(
         onProgress: (content) => {
           chatStore.append(projectId, [{ role: "assistant", content: `[build] ${content}` }]).catch(() => {});
         },
+        onCallStart: () => markCallStarted(projectId),
+        onUsage: (usage) => recordUsage(projectId, usage),
         onRunOutcome: (outcome) => {
           if (outcome.kind === "pending") {
             runStore.setStatus(projectId, "starting").catch(() => {});
@@ -624,6 +709,7 @@ export function createApp(
       res.json({ reply: ack.content, finishReason: "stop" });
 
       buildingProjects.add(projectId);
+      resetProgress(projectId, "Debug Agent");
       const liveInstance = await runStore.get(projectId);
       const liveComponents = liveInstance?.status === "live" ? liveInstance.components : undefined;
 
@@ -635,6 +721,8 @@ export function createApp(
         onProgress: (content) => {
           chatStore.append(projectId, [{ role: "assistant", content: `[debug] ${content}` }]).catch(() => {});
         },
+        onCallStart: () => markCallStarted(projectId),
+        onUsage: (usage) => recordUsage(projectId, usage),
       })
         .then((outcome) =>
           chatStore.append(projectId, [

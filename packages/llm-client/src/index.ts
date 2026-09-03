@@ -1,6 +1,8 @@
 export { loadGlmConfig, GlmConfigError } from "./config.js";
 export type { GlmConfig } from "./config.js";
 export { GlmClient, GlmRequestError } from "./glmClient.js";
+export { withUsageReporting } from "./usageReporting.js";
+export type { UsageReportingHooks } from "./usageReporting.js";
 export type {
   ChatCompletionRequest,
   ChatCompletionResult,

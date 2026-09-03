@@ -59,6 +59,7 @@ real streaming, and delivery. See the
 | POST | `/api/projects` | create a project (`{ name }`); scaffolds its workspace first, stage defaults to `ideation`; `500 scaffold_failed` if scaffolding fails (nothing is stored in that case) |
 | PATCH | `/api/projects/:id/stage` | set a project's stage; 400 if not one of `PROJECT_STAGES`, 404 if the project doesn't exist |
 | GET | `/api/projects/:id/messages` | persisted chat history for a project; 404 if the project doesn't exist |
+| GET | `/api/projects/:id/progress` | live LLM call status for the footer display (`{ progress: ProgressSnapshot \| null }`); 404 if the project doesn't exist — see Token usage reporting below |
 | POST | `/api/chat` | `{ projectId, message }` → `{ reply, finishReason }`; 400 on missing fields, 404 on an unknown `projectId`. `/build`, `/proceed`, `/run`, and `/stop` trigger real work instead of a chat passthrough — see below. |
 
 ### `/build` → `/proceed`: Intake, review, then Codegen
@@ -72,7 +73,8 @@ acknowledgement; the actual work happens in an un-awaited promise,
 posting further chat messages as it progresses:
 
 - `[build] <text>` — interim/informational (ack, "starting the
-  frontend," the Codegen Agent's own narration).
+  frontend," the Codegen Agent's own narration). Token usage is reported
+  separately — see Token usage reporting below — not mixed into chat.
 - `[build:question] <text>` — terminal: Intake Agent needs more
   information (or the `/build` had no description at all).
 - `[build:review] <text>` — terminal: a plan is ready for `/proceed`.
@@ -108,6 +110,25 @@ containers (data and code untouched). Both are guarded by a separate
 `runningOps` set against racing each other or the build's own automatic
 trigger for the same project.
 
+### Token usage reporting
+
+A small in-memory `progressByProject: Map<string, ProgressSnapshot>` in
+`createApp`'s closure (same lifetime as `buildingProjects`) tracks, per
+project, `{ agentLabel, totalSentTokens, totalReceivedTokens,
+callStartedAt }`. Each of `defaultRunIntakePhase`, `defaultRunCodegenPhase`,
+and `defaultRunDebugPhase` wraps the `llmClient` it receives with
+[`llm-client`](./llm-client.md)'s `withUsageReporting(client, { onCallStart,
+onUsage })`; the route handler wires those hooks to
+`markCallStarted`/`recordUsage` closures over `projectId`, and calls
+`resetProgress(projectId, "<Agent Name>")` at the start of each phase
+invocation (so totals are per phase, not cumulative across a whole
+`/build`). The label lives at the orchestrator call site — the agent
+packages themselves are unmodified. `GET /api/projects/:id/progress`
+exposes the current snapshot for the web UI's footer, polled on the same
+cadence as chat messages. See
+[token-usage-reporting.md](../../designs/token-usage-reporting.md)'s
+Amendment section.
+
 ## Known limitations
 
 - Projects and chat history persist in Postgres, but scaffolded files on
@@ -134,12 +155,17 @@ trigger for the same project.
   API tests (supertest + a mocked `LLMClient`, a fake disk-free scaffold
   function, a fake `RunBuild`, and the in-memory stores) covering health,
   project CRUD (including scaffold failure → 500, nothing stored), stage
-  updates, chat history, and `/build` (ack + interim + terminal messages,
-  the concurrency guard, empty-description rejection, ordinary chat
-  unaffected). Runs with no Postgres or Docker required — the real
-  `defaultRunBuild` (and therefore a real Intake/Codegen Agent run) was
-  verified manually through the actual browser UI, not in this suite; see
-  the design record's Outcome section.
+  updates, chat history, `/build` (ack + interim + terminal messages, the
+  concurrency guard, empty-description rejection, ordinary chat
+  unaffected), `defaultRunIntakePhase`'s usage reporting directly, and
+  `GET /api/projects/:id/progress` (null/404, cumulative accumulation
+  across calls, a real non-null `callStartedAt` while a fake call is
+  in-flight, reset-to-zero on a new phase). Runs with no Postgres or
+  Docker required — the real `defaultRunBuild`/`defaultRunCodegenPhase`/
+  `defaultRunDebugPhase` flow (and the live token-usage footer) was
+  verified manually through the actual browser UI and direct API calls,
+  not in this suite; see the design record's Outcome/Verification
+  sections.
 - [`test/scaffold.test.ts`](../../../packages/orchestrator/test/scaffold.test.ts) —
   exercises the real `fs.cp` copy against temp directories: copies the
   tree, creates `PROJECT_FILES_DIR` if missing, throws instead of

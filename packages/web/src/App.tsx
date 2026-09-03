@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 
 type ProjectStage =
   | "ideation"
@@ -36,8 +36,19 @@ interface ServerMessage {
   content: string | null;
 }
 
+interface ProgressSnapshot {
+  agentLabel: string;
+  totalSentTokens: number;
+  totalReceivedTokens: number;
+  callStartedAt: number | null;
+}
+
 const NEW_PROJECT_OPTION = "__new__";
-const BUILD_POLL_INTERVAL_MS = 4000;
+const SELECTED_PROJECT_STORAGE_KEY = "app-builder:selectedProjectId";
+const POLLING_ENABLED_STORAGE_KEY = "app-builder:pollingEnabled";
+const POLL_INTERVAL_STORAGE_KEY = "app-builder:pollIntervalMs";
+const POLL_INTERVAL_OPTIONS_MS = [2000, 4000, 10000, 30000];
+const DEFAULT_POLL_INTERVAL_MS = 4000;
 const BUILD_TERMINAL_PATTERN = /^\[build:(done|failed|question|review)\]/;
 const BUILD_PROGRESS_PATTERN = /^\[build\]/;
 // The Run Agent's outcome is independent of the build's — see
@@ -50,6 +61,46 @@ const RUN_PENDING_PATTERN = /^\[run\] Starting your app/;
 const RUN_TERMINAL_PATTERN = /^\[run:(live|failed)\]/;
 const DEBUG_PROGRESS_PATTERN = /^\[debug\]/;
 const DEBUG_TERMINAL_PATTERN = /^\[debug:(done|failed)\]/;
+
+function formatProgress(progress: ProgressSnapshot): string {
+  const totals = `${progress.agentLabel} — sent ${progress.totalSentTokens.toLocaleString()} / received ${progress.totalReceivedTokens.toLocaleString()} tokens`;
+  if (progress.callStartedAt === null) return totals;
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - progress.callStartedAt) / 1000));
+  return `${totals} · working... ${elapsedSeconds}s`;
+}
+
+// A project's history can span multiple /build, /proceed, and /debug
+// rounds over its lifetime — so "pending" must be judged from each
+// track's MOST RECENT tag, not from whether a terminal tag has ever
+// appeared anywhere in history. Scanning from the end and stopping at the
+// first relevant tag (progress or terminal) for a track correctly ignores
+// an older, already-resolved round. See bug #11: the original whole-
+// history `.some()` check meant any earlier terminal tag (e.g. a prior
+// /build's [build:review]) permanently poisoned detection for every
+// later round in the same project, typically stopping polling on the
+// very first tick after the next /proceed or /debug — reload or not.
+function isPendingByLastTag(messages: Message[], progressPattern: RegExp, terminalPattern: RegExp): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const content = messages[i].content;
+    if (terminalPattern.test(content)) return false;
+    if (progressPattern.test(content)) return true;
+  }
+  return false;
+}
+
+// Shared by the poll tick, the initial history load, and the Auto-refresh
+// toggle — a project has work in flight if any track's most recent tag is
+// a progress tag rather than a terminal one. See bug #11: buildingProjects
+// is otherwise only ever set from a live /build|/proceed|/debug response,
+// so nothing previously re-derived it from persisted history after a
+// reload.
+function hasPendingWork(messages: Message[]): boolean {
+  return (
+    isPendingByLastTag(messages, BUILD_PROGRESS_PATTERN, BUILD_TERMINAL_PATTERN) ||
+    isPendingByLastTag(messages, RUN_PENDING_PATTERN, RUN_TERMINAL_PATTERN) ||
+    isPendingByLastTag(messages, DEBUG_PROGRESS_PATTERN, DEBUG_TERMINAL_PATTERN)
+  );
+}
 
 function toDisplayMessages(serverMessages: ServerMessage[]): Message[] {
   return serverMessages
@@ -69,13 +120,66 @@ function App() {
   const [isSending, setIsSending] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [buildingProjects, setBuildingProjects] = useState<Record<string, boolean>>({});
+  const [progressByProject, setProgressByProject] = useState<Record<string, ProgressSnapshot | null>>({});
+  const [pollingEnabled, setPollingEnabled] = useState<boolean>(() => {
+    try {
+      const stored = localStorage.getItem(POLLING_ENABLED_STORAGE_KEY);
+      return stored === null ? true : stored === "true";
+    } catch {
+      return true;
+    }
+  });
+  const [pollIntervalMs, setPollIntervalMs] = useState<number>(() => {
+    try {
+      const stored = Number(localStorage.getItem(POLL_INTERVAL_STORAGE_KEY));
+      return POLL_INTERVAL_OPTIONS_MS.includes(stored) ? stored : DEFAULT_POLL_INTERVAL_MS;
+    } catch {
+      return DEFAULT_POLL_INTERVAL_MS;
+    }
+  });
+  const chatLogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(POLLING_ENABLED_STORAGE_KEY, String(pollingEnabled));
+    } catch {
+      // localStorage can throw (private browsing, disabled storage) — the
+      // toggle itself still works for the current session either way.
+    }
+  }, [pollingEnabled]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(POLL_INTERVAL_STORAGE_KEY, String(pollIntervalMs));
+    } catch {
+      // see above
+    }
+  }, [pollIntervalMs]);
+
+  useEffect(() => {
+    if (!selectedProjectId) return;
+    try {
+      localStorage.setItem(SELECTED_PROJECT_STORAGE_KEY, selectedProjectId);
+    } catch {
+      // see above
+    }
+  }, [selectedProjectId]);
 
   useEffect(() => {
     fetch("/api/projects")
       .then((res) => res.json())
       .then((body: { projects: Project[] }) => {
         setProjects(body.projects);
-        if (body.projects.length > 0) setSelectedProjectId(body.projects[0].id);
+        if (body.projects.length === 0) return;
+
+        let lastSelectedId: string | null = null;
+        try {
+          lastSelectedId = localStorage.getItem(SELECTED_PROJECT_STORAGE_KEY);
+        } catch {
+          // localStorage can throw — falls back to the first project below.
+        }
+        const stillExists = lastSelectedId && body.projects.some((p) => p.id === lastSelectedId);
+        setSelectedProjectId(stillExists ? lastSelectedId! : body.projects[0].id);
       })
       .catch((error) => {
         setLoadError(error instanceof Error ? error.message : "Failed to load projects");
@@ -92,8 +196,14 @@ function App() {
     fetch(`/api/projects/${projectId}/messages`)
       .then((res) => res.json())
       .then((body: { messages: ServerMessage[] }) => {
-        setMessagesByProject((prev) => ({ ...prev, [projectId]: toDisplayMessages(body.messages) }));
+        const fresh = toDisplayMessages(body.messages);
+        setMessagesByProject((prev) => ({ ...prev, [projectId]: fresh }));
         setLoadedHistoryFor((prev) => new Set(prev).add(projectId));
+        // Resumes polling after a reload (or first-ever load) if the
+        // persisted history shows work still in flight — see bug #11.
+        if (hasPendingWork(fresh)) {
+          setBuildingProjects((prev) => ({ ...prev, [projectId]: true }));
+        }
       })
       .catch((error) => {
         setLoadError(error instanceof Error ? error.message : "Failed to load chat history");
@@ -111,7 +221,7 @@ function App() {
   // outcome that was actually announced (a [run] "Starting your app..."
   // message means a [run:live]/[run:failed] is still owed).
   useEffect(() => {
-    if (!selectedProjectId || !buildingProjects[selectedProjectId]) return;
+    if (!selectedProjectId || !buildingProjects[selectedProjectId] || !pollingEnabled) return;
     const projectId = selectedProjectId;
 
     const interval = setInterval(() => {
@@ -125,36 +235,65 @@ function App() {
 
           setMessagesByProject((prev) => ({ ...prev, [projectId]: fresh }));
 
-          const buildPending =
-            fresh.some((m) => BUILD_PROGRESS_PATTERN.test(m.content)) &&
-            !fresh.some((m) => BUILD_TERMINAL_PATTERN.test(m.content));
-          const runPending =
-            fresh.some((m) => RUN_PENDING_PATTERN.test(m.content)) &&
-            !fresh.some((m) => RUN_TERMINAL_PATTERN.test(m.content));
-          const debugPending =
-            fresh.some((m) => DEBUG_PROGRESS_PATTERN.test(m.content)) &&
-            !fresh.some((m) => DEBUG_TERMINAL_PATTERN.test(m.content));
-
-          if (!buildPending && !runPending && !debugPending) {
+          if (!hasPendingWork(fresh)) {
             setBuildingProjects((prev) => ({ ...prev, [projectId]: false }));
           }
         })
         .catch((error) => {
           setLoadError(error instanceof Error ? error.message : "Failed to poll build progress");
         });
-    }, BUILD_POLL_INTERVAL_MS);
+
+      fetch(`/api/projects/${projectId}/progress`)
+        .then((res) => res.json())
+        .then((body: { progress: ProgressSnapshot | null }) => {
+          setProgressByProject((prev) => ({ ...prev, [projectId]: body.progress }));
+        })
+        .catch(() => {
+          // Non-critical — the footer just won't update this tick.
+        });
+    }, pollIntervalMs);
 
     return () => clearInterval(interval);
-  }, [selectedProjectId, buildingProjects, messagesByProject]);
+  }, [selectedProjectId, buildingProjects, messagesByProject, pollingEnabled, pollIntervalMs]);
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId) ?? null;
   const messages = selectedProjectId ? (messagesByProject[selectedProjectId] ?? []) : [];
+  const selectedProgress = selectedProjectId ? (progressByProject[selectedProjectId] ?? null) : null;
+
+  // Keep the chat log scrolled to the latest message whenever the visible
+  // message list changes (new send, poll tick, or switching projects).
+  useEffect(() => {
+    const node = chatLogRef.current;
+    if (!node) return;
+    node.scrollTop = node.scrollHeight;
+  }, [messages, isSending]);
 
   function appendMessage(projectId: string, message: Message) {
     setMessagesByProject((prev) => ({
       ...prev,
       [projectId]: [...(prev[projectId] ?? []), message],
     }));
+  }
+
+  // Flipping Auto-refresh on doesn't just toggle the flag — it re-checks
+  // the current project's real state so polling actually resumes right
+  // away if there's work in flight, rather than waiting on the next
+  // message send or page reload to notice. See bug #11.
+  function handlePollingToggle(enabled: boolean) {
+    setPollingEnabled(enabled);
+    if (!enabled || !selectedProjectId) return;
+    const projectId = selectedProjectId;
+
+    fetch(`/api/projects/${projectId}/messages`)
+      .then((res) => res.json())
+      .then((body: { messages: ServerMessage[] }) => {
+        const fresh = toDisplayMessages(body.messages);
+        setMessagesByProject((prev) => ({ ...prev, [projectId]: fresh }));
+        setBuildingProjects((prev) => ({ ...prev, [projectId]: hasPendingWork(fresh) }));
+      })
+      .catch((error) => {
+        setLoadError(error instanceof Error ? error.message : "Failed to check build progress");
+      });
   }
 
   function handleProjectSelect(value: string) {
@@ -320,9 +459,33 @@ function App() {
         )}
 
         {loadError && <p className="chat-error-banner">{loadError}</p>}
+
+        <div className="polling-bar">
+          <label>
+            <input
+              type="checkbox"
+              checked={pollingEnabled}
+              onChange={(event) => handlePollingToggle(event.target.checked)}
+            />
+            Auto-refresh
+          </label>
+          {pollingEnabled && (
+            <select
+              className="poll-interval-select"
+              value={pollIntervalMs}
+              onChange={(event) => setPollIntervalMs(Number(event.target.value))}
+            >
+              {POLL_INTERVAL_OPTIONS_MS.map((ms) => (
+                <option key={ms} value={ms}>
+                  Every {ms / 1000}s
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
       </header>
 
-      <div className="chat-log">
+      <div className="chat-log" ref={chatLogRef}>
         {!selectedProjectId && (
           <p className="chat-empty">Select or create a project to start chatting.</p>
         )}
@@ -357,6 +520,8 @@ function App() {
           Send
         </button>
       </form>
+
+      {selectedProgress && <div className="progress-footer">{formatProgress(selectedProgress)}</div>}
     </div>
   );
 }

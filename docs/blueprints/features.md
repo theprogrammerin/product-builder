@@ -32,6 +32,9 @@ Create or select a project and track its stage through a fixed pipeline:
 - API: `GET/POST /api/projects`, `PATCH /api/projects/:id/stage` — [`projectStore.ts`](../../packages/orchestrator/src/projectStore.ts), [`app.ts`](../../packages/orchestrator/src/app.ts)
 - UI: project dropdown, "+ New project" inline form, stage selector — [`App.tsx`](../../packages/web/src/App.tsx)
 - Stage changes are manual today — nothing yet infers or advances a stage automatically.
+- The last-selected project is remembered across a page reload
+  (`localStorage`, browser-scoped) — reloading reselects it instead of
+  always defaulting to the first project in the list.
 
 ## Project scaffolding
 
@@ -111,6 +114,15 @@ conversation, including after an orchestrator restart or a page reload.
 - Ordinary messages go straight to the configured GLM model with a static
   system prompt — no app-generation logic behind them. See `/build` below
   for what does generate something.
+- The chat log always auto-scrolls to the latest message.
+- An "Auto-refresh" toggle (on by default) sits above the chat log,
+  controlling whether `/build`/`/run`/`/debug` progress polling (below)
+  runs at all; while it's on, a dropdown next to it picks the polling
+  interval (2s/4s/10s/30s, 4s by default). Turning it off fully pauses
+  polling — an in-flight build's progress and result won't appear until
+  it's turned back on or the page is reloaded. Both settings persist in
+  the browser's `localStorage`. Design record:
+  [`polling-toggle.md`](../designs/polling-toggle.md)
 
 ## `/build <description>` — real code generation from chat
 
@@ -138,6 +150,27 @@ quirk, and a typo along the way.
   zip), and no durable job queue — an orchestrator restart mid-build
   loses that result.
 - Design record: [`wire-agents-into-chat.md`](../designs/wire-agents-into-chat.md)
+
+## Per-agent token usage reporting
+
+A persistent status line in the footer, near the message input, shows
+token consumption live while the Intake, Codegen, or Debug Agent is
+working — updated on the same poll tick as chat messages, not as chat
+messages themselves:
+
+- Idle between calls: `"Codegen Agent — sent 4,820 / received 1,140
+  tokens"` — cumulative totals so far in the current phase.
+- Mid-call: `"Codegen Agent — sent 4,820 / received 1,140 tokens ·
+  working... 14s"` — a real elapsed-time heartbeat (no fabricated token
+  counts) so it never looks stalled during a long-running call.
+- Totals are per phase invocation, not cumulative across a whole
+  `/build`: Intake, Codegen, and Debug each start their own count from
+  zero. Debug Agent's backend and frontend passes share one running total
+  under the label `"Debug Agent"`.
+- Hidden when nothing has run yet for the selected project; pausing
+  polling (the Auto-refresh toggle above) also freezes it.
+- Design record: [`token-usage-reporting.md`](../designs/token-usage-reporting.md)
+  (see its Amendment section for this footer-based delivery)
 
 ## Running a generated project — `/run` and `/stop`
 

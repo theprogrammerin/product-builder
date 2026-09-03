@@ -7,6 +7,69 @@ together.
 
 ## Unreleased
 
+### Remember the last-selected project across a reload (feature request #15)
+
+The web chat UI always defaulted to the first project in the list on
+load. `selectedProjectId` is now persisted to `localStorage` and restored
+on load if it's still a valid project, falling back to the first one
+otherwise.
+
+### Fix: Auto-refresh polling stopping after almost any `/proceed`/`/debug` (bug #11)
+
+Polling was stopping on the very first tick after nearly any `/proceed` or
+`/debug` past a project's first ever build — not just after a page
+reload. Root cause: pending-detection scanned a project's *entire*
+message history for a terminal tag, so an old `[build:review]` from an
+earlier `/build` round permanently poisoned detection for every later
+round. Fixed by judging each track (build/run/debug) from its most recent
+tag only. Also fixed: nothing previously re-derived `buildingProjects`
+from persisted history, so a genuine reload mid-build never resumed
+polling either — now checked on initial history load and whenever
+Auto-refresh is switched on. Live-verified: a build kicked off entirely
+outside the browser (via the API directly) was picked up correctly by a
+freshly-loaded page, with polling and the token-usage footer continuing
+across many ticks.
+
+### Token usage: footer status display, not chat messages (feature request #14, amends #13)
+
+Feature #13's chat-message delivery is replaced before ever being
+committed: token usage now lives in a persistent footer near the message
+input — `"<Agent> — sent X / received Y tokens"`, cumulative per phase,
+plus `" · working... Ns"` while a call is in flight. `withUsageReporting`
+gained an `onCallStart` hook alongside `onUsage`; a new in-memory
+`progressByProject` map in the orchestrator (reset at the start of each
+phase) backs a new `GET /api/projects/:id/progress` endpoint, polled by
+the web UI on the same tick as chat messages. Live-verified end-to-end
+against a real GLM endpoint and Docker build: real cumulative totals, a
+genuine non-null `callStartedAt` caught mid-call, and the footer actually
+rendering in the browser during a real `/build` → `/proceed`. Design
+record: [`token-usage-reporting.md`](docs/designs/token-usage-reporting.md)'s
+Amendment section.
+
+### Per-agent LLM token usage reporting (feature request #13)
+
+Chat progress now includes a line per LLM call — `"<Agent Name>: sent X
+tokens, received Y tokens"` — for the Intake, Codegen, and Debug Agents.
+Implemented generically at the `@app-builder/llm-client` layer: a new
+`withUsageReporting(client, onUsage)` decorator wraps an `LLMClient` and
+invokes `onUsage` with each call's token usage, transparently otherwise.
+None of `codegen-agent`, `intake-agent`, or `debug-agent` changed at all —
+the orchestrator wraps the client once per phase, with its own agent
+label, before handing it to the agent it already calls. A future agent
+gets this for free just by being handed a wrapped client. Design record:
+[`token-usage-reporting.md`](docs/designs/token-usage-reporting.md).
+
+### Web chat: polling on/off toggle + interval picker (feature request #12)
+
+The chat UI's `/build`/`/run`/`/debug` progress polling, previously always
+on at a fixed 4s, now has an "Auto-refresh" checkbox and — while it's
+checked — a dropdown to pick the interval (2s/4s/10s/30s). Turning it off
+fully pauses polling until it's re-enabled or the page is reloaded. Both
+settings persist across reloads via `localStorage`. Folded in as small
+fixes alongside this (bugs #9, #10): the chat log now auto-scrolls to the
+latest message, and its visible border was removed. Design record:
+[`polling-toggle.md`](docs/designs/polling-toggle.md).
+
 ### Debug Agent — `/debug` (feature request #11)
 
 A generated project can now be fixed, not just built. `/debug

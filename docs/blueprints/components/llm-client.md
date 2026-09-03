@@ -15,6 +15,17 @@ callers.
   `loadGlmConfig()`, fail-fast env validation
 - [`src/glmClient.ts`](../../../packages/llm-client/src/glmClient.ts) —
   `GlmClient`, the only `LLMClient` implementation today
+- [`src/usageReporting.ts`](../../../packages/llm-client/src/usageReporting.ts) —
+  `withUsageReporting(client, { onCallStart?, onUsage })`: a transparent
+  `LLMClient` decorator. `onCallStart` fires synchronously right before
+  delegating to the wrapped client's `chat()` (lets a caller know a call
+  began, e.g. for an elapsed-time "still working" indicator); `onUsage`
+  fires with the call's token usage once it resolves, if the response
+  carries one. Otherwise a pure pass-through — same request in, same
+  result out. Lets a caller (today, the orchestrator) report token usage
+  and call timing per LLM call without any agent needing to know this
+  exists — see
+  [token-usage-reporting.md](../../designs/token-usage-reporting.md).
 - [`README.md`](../../../packages/llm-client/README.md) — usage and full
   configuration reference
 
@@ -34,9 +45,9 @@ package README for the full table.
 
 ## Tests
 
-[`test/`](../../../packages/llm-client/test) — 15 tests, mocked `fetch`,
-no network hit. `npm run smoke --workspace @app-builder/llm-client` sends
-one real request to whatever endpoint is in `.env` — use it to verify
+[`test/`](../../../packages/llm-client/test) — 20 tests, mocked `fetch`/fake
+clients, no network hit. `npm run smoke --workspace @app-builder/llm-client`
+sends one real request to whatever endpoint is in `.env` — use it to verify
 connectivity/credentials, not in CI.
 
 ## Known limitations

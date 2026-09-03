@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import request from "supertest";
-import type { ChatCompletionRequest, ChatCompletionResult, LLMClient } from "@app-builder/llm-client";
+import type { ChatCompletionRequest, ChatCompletionResult, LLMClient, Usage } from "@app-builder/llm-client";
 import type { RunAgent, StartResult } from "@app-builder/run-agent";
 import {
   createApp,
+  defaultRunIntakePhase,
   type CodegenOutcome,
   type DebugOutcome,
   type IntakeOutcome,
@@ -28,18 +29,32 @@ function fakeScaffold(): Scaffold & ReturnType<typeof vi.fn> {
   return vi.fn(async (projectId: string) => `/fake/workspace/${projectId}`);
 }
 
-function fakeRunIntakePhase(outcome: IntakeOutcome): RunIntakePhase & ReturnType<typeof vi.fn> {
-  return vi.fn(async () => outcome);
+function fakeRunIntakePhase(
+  outcome: IntakeOutcome,
+  usages: Usage[] = [],
+): RunIntakePhase & ReturnType<typeof vi.fn> {
+  return vi.fn(async ({ onCallStart, onUsage }) => {
+    for (const usage of usages) {
+      onCallStart();
+      onUsage(usage);
+    }
+    return outcome;
+  });
 }
 
 function fakeRunCodegenPhase(
   outcome: CodegenOutcome,
   progress: string[] = [],
   runOutcomes: RunOutcome[] = [],
+  usages: Usage[] = [],
 ): RunCodegenPhase & ReturnType<typeof vi.fn> {
-  return vi.fn(async ({ onProgress, onRunOutcome }) => {
+  return vi.fn(async ({ onProgress, onRunOutcome, onCallStart, onUsage }) => {
     for (const message of progress) onProgress(message);
     for (const runOutcome of runOutcomes) onRunOutcome(runOutcome);
+    for (const usage of usages) {
+      onCallStart();
+      onUsage(usage);
+    }
     return outcome;
   });
 }
@@ -47,9 +62,14 @@ function fakeRunCodegenPhase(
 function fakeRunDebugPhase(
   outcome: DebugOutcome,
   progress: string[] = [],
+  usages: Usage[] = [],
 ): RunDebugPhase & ReturnType<typeof vi.fn> {
-  return vi.fn(async ({ onProgress }) => {
+  return vi.fn(async ({ onProgress, onCallStart, onUsage }) => {
     for (const message of progress) onProgress(message);
+    for (const usage of usages) {
+      onCallStart();
+      onUsage(usage);
+    }
     return outcome;
   });
 }
@@ -968,6 +988,189 @@ describe("POST /api/chat — /debug", () => {
     expect(runDebugPhase).toHaveBeenCalledTimes(1);
 
     resolveFirst({ kind: "done", content: "done" });
+    await flush();
+  });
+});
+
+describe("defaultRunIntakePhase", () => {
+  it("reports usage via onUsage and returns the reply content unchanged", async () => {
+    const chat = vi.fn(
+      async (_request: ChatCompletionRequest): Promise<ChatCompletionResult> => ({
+        message: { role: "assistant", content: "## Resource\nTask\n" },
+        finishReason: "stop",
+        usage: { promptTokens: 100, completionTokens: 40, totalTokens: 140 },
+      }),
+    );
+    const onCallStart = vi.fn();
+    const onUsage = vi.fn();
+
+    const result = await defaultRunIntakePhase({
+      description: "a task tracker",
+      llmClient: { chat },
+      onCallStart,
+      onUsage,
+    });
+
+    expect(result.content).toBe("## Resource\nTask");
+    expect(onCallStart).toHaveBeenCalledTimes(1);
+    expect(onUsage).toHaveBeenCalledWith({ promptTokens: 100, completionTokens: 40, totalTokens: 140 });
+  });
+
+  it("does not call onUsage when the result has no usage", async () => {
+    const chat = vi.fn(
+      async (_request: ChatCompletionRequest): Promise<ChatCompletionResult> => ({
+        message: { role: "assistant", content: "## Resource\nTask\n" },
+        finishReason: "stop",
+      }),
+    );
+    const onUsage = vi.fn();
+
+    const result = await defaultRunIntakePhase({
+      description: "a task tracker",
+      llmClient: { chat },
+      onCallStart: vi.fn(),
+      onUsage,
+    });
+
+    expect(result.content).toBe("## Resource\nTask");
+    expect(onUsage).not.toHaveBeenCalled();
+  });
+});
+
+describe("GET /api/projects/:id/progress", () => {
+  it("returns null when nothing has run for the project yet", async () => {
+    const app = createApp(fakeLlmClient(), healthInfo, undefined, undefined, fakeScaffold());
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+
+    const response = await request(app).get(`/api/projects/${created.body.project.id}/progress`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ progress: null });
+  });
+
+  it("404s for an unknown project", async () => {
+    const app = createApp(fakeLlmClient(), healthInfo, undefined, undefined, fakeScaffold());
+    const response = await request(app).get("/api/projects/does-not-exist/progress");
+    expect(response.status).toBe(404);
+  });
+
+  it("accumulates token totals across multiple LLM calls during /proceed, clearing callStartedAt once done", async () => {
+    const spec = "## Resource\nTask\n";
+    const runIntakePhase = fakeRunIntakePhase({ kind: "spec", content: spec });
+    const runCodegenPhase = fakeRunCodegenPhase(
+      { kind: "done", content: "Build complete" },
+      [],
+      [],
+      [
+        { promptTokens: 100, completionTokens: 20, totalTokens: 120 },
+        { promptTokens: 150, completionTokens: 30, totalTokens: 180 },
+      ],
+    );
+    const app = createApp(
+      fakeLlmClient(),
+      healthInfo,
+      undefined,
+      undefined,
+      fakeScaffold(),
+      runIntakePhase,
+      runCodegenPhase,
+    );
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    await request(app).post("/api/chat").send({ projectId, message: `/build ${spec}` });
+    await request(app).post("/api/chat").send({ projectId, message: "/proceed" });
+    await flush();
+
+    const response = await request(app).get(`/api/projects/${projectId}/progress`);
+
+    expect(response.body).toEqual({
+      progress: {
+        agentLabel: "Codegen Agent",
+        totalSentTokens: 250,
+        totalReceivedTokens: 50,
+        callStartedAt: null,
+      },
+    });
+  });
+
+  it("reports a non-null callStartedAt while a call is in flight", async () => {
+    const spec = "## Resource\nTask\n";
+    const runIntakePhase = fakeRunIntakePhase({ kind: "spec", content: spec });
+    let resolvePhase!: (outcome: CodegenOutcome) => void;
+    const runCodegenPhase: RunCodegenPhase = vi.fn(
+      ({ onCallStart }) =>
+        new Promise<CodegenOutcome>((resolve) => {
+          onCallStart();
+          resolvePhase = resolve;
+        }),
+    );
+    const app = createApp(
+      fakeLlmClient(),
+      healthInfo,
+      undefined,
+      undefined,
+      fakeScaffold(),
+      runIntakePhase,
+      runCodegenPhase,
+    );
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    await request(app).post("/api/chat").send({ projectId, message: `/build ${spec}` });
+    await request(app).post("/api/chat").send({ projectId, message: "/proceed" });
+
+    const response = await request(app).get(`/api/projects/${projectId}/progress`);
+
+    expect(response.body.progress).toMatchObject({ agentLabel: "Codegen Agent" });
+    expect(typeof response.body.progress.callStartedAt).toBe("number");
+
+    resolvePhase({ kind: "done", content: "done" });
+    await flush();
+  });
+
+  it("resets totals to zero when a new phase starts for the same project", async () => {
+    const spec = "## Resource\nTask\n";
+    const runIntakePhase = fakeRunIntakePhase({ kind: "spec", content: spec });
+    const firstCodegenPhase = fakeRunCodegenPhase(
+      { kind: "failed", content: "first build failed" },
+      [],
+      [],
+      [{ promptTokens: 500, completionTokens: 100, totalTokens: 600 }],
+    );
+    let resolveSecond!: (outcome: CodegenOutcome) => void;
+    const secondCodegenPhase: RunCodegenPhase = vi.fn(
+      () => new Promise<CodegenOutcome>((resolve) => (resolveSecond = resolve)),
+    );
+    let currentCodegenPhase = firstCodegenPhase as RunCodegenPhase;
+    const runCodegenPhase: RunCodegenPhase = (params) => currentCodegenPhase(params);
+    const app = createApp(
+      fakeLlmClient(),
+      healthInfo,
+      undefined,
+      undefined,
+      fakeScaffold(),
+      runIntakePhase,
+      runCodegenPhase,
+    );
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    await request(app).post("/api/chat").send({ projectId, message: `/build ${spec}` });
+    await request(app).post("/api/chat").send({ projectId, message: "/proceed" });
+    await flush();
+
+    const afterFirst = await request(app).get(`/api/projects/${projectId}/progress`);
+    expect(afterFirst.body.progress.totalSentTokens).toBe(500);
+
+    currentCodegenPhase = secondCodegenPhase;
+    await request(app).post("/api/chat").send({ projectId, message: `/build ${spec}` });
+    await request(app).post("/api/chat").send({ projectId, message: "/proceed" });
+
+    const afterSecondStart = await request(app).get(`/api/projects/${projectId}/progress`);
+    expect(afterSecondStart.body.progress.totalSentTokens).toBe(0);
+
+    resolveSecond({ kind: "done", content: "done" });
     await flush();
   });
 });
