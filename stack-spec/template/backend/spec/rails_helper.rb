@@ -23,7 +23,12 @@ require 'rspec/rails'
 # directory. Alternatively, in the individual `*_spec.rb` files, manually
 # require only the support files necessary.
 #
-# Rails.root.glob('spec/support/**/*.rb').sort_by(&:to_s).each { |f| require f }
+# Uncommented (from the stock generator's default) — spec/support/ is
+# where the testing guideline's FactoryBot::Syntax::Methods include
+# belongs, and leaving this commented cost real iteration budget in a
+# live run: the model had to debug from scratch why its support file
+# wasn't taking effect. See docs/designs/frontend-generation.md.
+Rails.root.glob('spec/support/**/*.rb').sort_by(&:to_s).each { |f| require f }
 
 # Checks for pending migrations and applies them before tests are run.
 # If you are not using ActiveRecord, you can remove these lines.

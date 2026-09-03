@@ -1,6 +1,5 @@
 import type { ChatMessage, LLMClient } from "@app-builder/llm-client";
 import type { DockerRunner } from "./dockerExec.js";
-import type { BuildSpec } from "./promptContext.js";
 import { TOOL_DEFINITIONS, type FileTools } from "./tools.js";
 
 export interface RunResult {
@@ -18,17 +17,62 @@ export type AgentEvent =
 export interface RunOptions {
   llmClient: LLMClient;
   systemPrompt: string;
-  buildSpec: BuildSpec;
+  buildSpec: string;
   fileTools: FileTools;
   dockerRunner: DockerRunner;
   maxIterations?: number;
   onEvent?: (event: AgentEvent) => void;
+  /**
+   * Final, authoritative check run after the loop — the model's own
+   * "done" claim is never trusted alone. Default: "bundle exec rspec".
+   * Only consulted by runCodegenAgent, not runCodegenLoop itself.
+   */
+  verifyCommand?: string;
 }
 
-const DEFAULT_MAX_ITERATIONS = 25;
+// Proven sufficient for one resource in Milestone 1. Floor for the
+// scaling formula below, not just a flat default any more — see
+// docs/designs/multi-resource-support.md.
+const MIN_MAX_ITERATIONS = 25;
+const ITERATIONS_PER_RESOURCE = 20;
 // Generous: this model spends tokens on hidden reasoning before visible
 // output, so a small cap risks silently truncating to empty content.
 const DEFAULT_MAX_TOKENS = 4096;
+
+/**
+ * A fixed iteration cap that happened to work for one resource won't
+ * scale to a multi-resource build spec. This counts `## Resource`
+ * headings — a cheap heuristic, not a real parse of fields/associations,
+ * so it doesn't reintroduce the structured-spec parsing this design
+ * deliberately avoided elsewhere (see docs/designs/multi-resource-support.md).
+ */
+export function defaultMaxIterations(buildSpec: string): number {
+  const resourceCount = buildSpec.match(/^##\s*Resource\s*$/gim)?.length || 1;
+  return Math.max(MIN_MAX_ITERATIONS, resourceCount * ITERATIONS_PER_RESOURCE);
+}
+
+// Higher floor than the backend's 25: a live run (single Task resource,
+// two screens) hit this cap twice without converging — once at 20
+// iterations from an early false "convergence" (the model emitted a
+// malformed pseudo-tool-call as plain text instead of a real tool call,
+// which the loop correctly-but-unhelpfully read as "done"), and once by
+// genuinely running out of room mid-fix at 25. The frontend phase's
+// scope per resource is broader than backend's (API client + Zustand
+// store + N screens + navigation + three kinds of tests +
+// type-checking), so it's scaled by screen count, not resource count.
+// See docs/designs/frontend-generation.md.
+const MIN_FRONTEND_MAX_ITERATIONS = 40;
+const ITERATIONS_PER_SCREEN = 15;
+
+/**
+ * Counts `### <name>` sub-headings under the build spec's `## Screens`
+ * section — a cheap heading count, not a real parse, same principle as
+ * defaultMaxIterations above.
+ */
+export function defaultFrontendMaxIterations(buildSpec: string): number {
+  const screenCount = buildSpec.match(/^###\s+.+$/gim)?.length || 1;
+  return Math.max(MIN_FRONTEND_MAX_ITERATIONS, screenCount * ITERATIONS_PER_SCREEN);
+}
 
 const EMPTY_RESPONSE_NUDGE =
   "Your last response had no tool calls and no content — that isn't a " +
@@ -52,13 +96,13 @@ export async function runCodegenLoop(options: RunOptions): Promise<RunResult> {
     buildSpec,
     fileTools,
     dockerRunner,
-    maxIterations = DEFAULT_MAX_ITERATIONS,
+    maxIterations = defaultMaxIterations(buildSpec),
     onEvent,
   } = options;
 
   const messages: ChatMessage[] = [
     { role: "system", content: systemPrompt },
-    { role: "user", content: `Build spec:\n${JSON.stringify(buildSpec, null, 2)}` },
+    { role: "user", content: `Build spec:\n${buildSpec}` },
   ];
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
@@ -104,6 +148,48 @@ export async function runCodegenLoop(options: RunOptions): Promise<RunResult> {
   }
 
   return { iterations: maxIterations, converged: false, transcript: messages };
+}
+
+export interface RunCodegenAgentResult {
+  converged: boolean;
+  iterations: number;
+  testsPassed: boolean;
+  /** e.g. "31 examples, 0 failures" (rspec) or "Tests: 3 passed, 3 total" (jest), parsed from the verify command's own stdout. */
+  verifySummary: string;
+  verifyOutput: string;
+}
+
+/**
+ * Wraps runCodegenLoop with a final, authoritative verification command —
+ * extracted so the CLI and the orchestrator's chat integration (see
+ * docs/designs/wire-agents-into-chat.md) share this exact sequence
+ * instead of duplicating it. Teardown (`dockerRunner.down()`) stays the
+ * caller's responsibility, same as before this extraction.
+ *
+ * `verifyCommand` defaults to "bundle exec rspec" (backend); the frontend
+ * phase passes "npx jest" instead — see
+ * docs/designs/frontend-generation.md. Same function either way: only
+ * the prompt, file tools, docker service, and this command differ.
+ */
+export async function runCodegenAgent(options: RunOptions): Promise<RunCodegenAgentResult> {
+  const verifyCommand = options.verifyCommand ?? "bundle exec rspec";
+  const loopResult = await runCodegenLoop(options);
+  const verification = await options.dockerRunner.run(verifyCommand);
+  // Jest writes its own summary reporter output to stderr, not stdout —
+  // RSpec's summary is on stdout. Search both rather than assuming one.
+  const combinedOutput = `${verification.stdout}\n${verification.stderr}`;
+  const summary =
+    combinedOutput.match(/^\d+ examples?, \d+ failures?.*$/m)?.[0] ??
+    combinedOutput.match(/^Tests:.*$/m)?.[0] ??
+    `${verifyCommand} exited ${verification.exitCode}`;
+
+  return {
+    converged: loopResult.converged,
+    iterations: loopResult.iterations,
+    testsPassed: verification.exitCode === 0,
+    verifySummary: summary,
+    verifyOutput: combinedOutput,
+  };
 }
 
 async function executeTool(

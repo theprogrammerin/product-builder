@@ -7,6 +7,102 @@ together.
 
 ## Unreleased
 
+### Phase 3, Milestone 1 — `/build` wires the Intake + Codegen Agents into chat (feature request #7)
+
+A chat message starting with `/build <description>` now actually
+generates and verifies real backend code — no more CLI-only agents.
+Verified end-to-end through the real browser UI 2026-09-02: a task-
+tracker description went from `/build` to a passing `Task` resource (19
+examples, 0 failures), with live progress visible via polling and the
+agent self-correcting a namespace mismatch, a serializer quirk, and a
+typo along the way.
+
+- `packages/orchestrator`: `/api/chat` branches on a `/build` prefix,
+  calling `runIntake`/`runCodegenAgent` (both agents' first real
+  consumer beyond their own CLIs) in-process against the project's
+  scaffolded workspace. The build runs as a fire-and-forget promise —
+  the HTTP response is just an immediate ack — posting further
+  `[build]`/`[build:done]`/`[build:failed]`/`[build:question]`-tagged
+  chat messages as it progresses. Guarded against a second concurrent
+  `/build` for the same project.
+- `packages/codegen-agent`: extracted `runCodegenAgent()` (loop + final
+  `bundle exec rspec` verification) out of `cli.ts` so the CLI and the
+  orchestrator share the same tested code.
+- `packages/web`: detects a `/build` submission and polls
+  `GET /api/projects/:id/messages` every 4s while one is in flight,
+  stopping once a terminal-tagged message arrives — plain HTTP polling,
+  not real streaming.
+- The chat system prompt (from bug #1's fix) now points users at `/build`
+  instead of just saying app generation isn't available.
+- Design record: [`docs/designs/wire-agents-into-chat.md`](docs/designs/wire-agents-into-chat.md)
+
+### Multi-resource support (feature request #6)
+
+Both agents were hard-limited to one resource per run. Now an arbitrary
+number of related resources — not just two — can be described and built
+in one pass, verified with real Docker/Rails runs on a 2-resource
+(List/Item) and a 3-resource (List/Item/Comment) case: 31 and 36 examples
+respectively, 0 failures, both converging comfortably under their scaled
+iteration caps.
+
+- `packages/intake-agent`: system prompt now allows repeated
+  `## Resource` blocks plus an `## Associations` section
+  (`belongs_to`/`has_many`/`has_one`); multi-resource is no longer by
+  itself a reason to ask a clarifying question — only genuinely missing
+  or unresolvable (e.g. circular) relationships are.
+- `packages/codegen-agent`: system prompt's required sequence now builds
+  every resource in a spec, in dependency order, before running the full
+  suite once; `DEFAULT_MAX_ITERATIONS` (a flat 25) is replaced by
+  `defaultMaxIterations(buildSpec)`, which scales with how many
+  `## Resource` headings the spec contains (`max(25, resourceCount * 20)`)
+  — a cheap heading count, not a real parse.
+- Design record: [`docs/designs/multi-resource-support.md`](docs/designs/multi-resource-support.md)
+
+### Bug fix: Intake Agent sometimes failed outright on an empty model response (bug #2)
+
+- `runIntake` now retries once, silently, if the model's response comes
+  back empty before giving up — observed completion-token usage for the
+  *same* input varied from ~500 to ~2600 tokens purely from this model's
+  hidden reasoning, so an empty response looked like transient variance,
+  not a systematic problem, and a single retry recovers it in practice.
+  Still one-shot from the user's point of view — no conversation loop,
+  just one internal retry on a truly empty result.
+- Raised default `maxTokens` 4096 → 8192, as further headroom against the
+  same variance.
+- The CLI now prints a plain, actionable message if both calls come back
+  empty, instead of a raw stack trace.
+
+### Phase 2 — Intake Agent (feature request #5)
+
+First slice: a CLI that turns a free-text product description into the
+same markdown build-spec file the Codegen Agent already reads — no JSON,
+no schema, no parser on either side. Verified against the real GLM
+endpoint 2026-09-02 on both the spec path and the clarifying-question
+path.
+
+- Add `packages/intake-agent`: `runIntake` makes one `llmClient.chat()`
+  call (no tool-calling loop) and returns either a markdown spec or a
+  clarifying question, distinguished only by a `QUESTION:` first-line
+  marker — not a parser.
+- Change `packages/codegen-agent`'s `--spec` handling: `loadBuildSpec`
+  now reads the file as plain text instead of `JSON.parse`-ing it into a
+  `BuildSpec` object, since the loop only ever re-serialized it into a
+  text prompt message anyway. Backward compatible — any existing
+  hand-written JSON spec still works, just as literal text now.
+- Design record: [`docs/designs/intake-agent-milestone-1.md`](docs/designs/intake-agent-milestone-1.md)
+
+### Bug fix: chat's "not built yet" refusal leaked reasoning-style narration (bug #1)
+
+- Chat's system prompt only said "be direct about what isn't built yet,"
+  leaving the model to invent its own phrasing when asked to build/generate
+  an app — it produced narrated, reasoning-style refusals (e.g. "I don't
+  want to hand you a fake URL, so I'll skip that part") instead of a clean
+  product message.
+- Fix: `SYSTEM_PROMPT` in `packages/orchestrator/src/app.ts` now explicitly
+  instructs one short, plain sentence for that case — no hedging, no
+  reasoning out loud. No capability or architecture change; chat still has
+  no app-generation logic behind it.
+
 ### Phase 1, Milestone 1 — Codegen Agent passes end-to-end (feature requests #2, #4)
 
 First working slice of the Codegen Agent: given a scaffolded project and

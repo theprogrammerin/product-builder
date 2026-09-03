@@ -37,6 +37,15 @@ interface ServerMessage {
 }
 
 const NEW_PROJECT_OPTION = "__new__";
+const BUILD_POLL_INTERVAL_MS = 4000;
+const BUILD_TERMINAL_PATTERN = /^\[build:(done|failed|question|review)\]/;
+const BUILD_PROGRESS_PATTERN = /^\[build\]/;
+
+function toDisplayMessages(serverMessages: ServerMessage[]): Message[] {
+  return serverMessages
+    .filter((m) => m.role === "user" || m.role === "assistant")
+    .map((m) => ({ role: m.role as "user" | "assistant", content: m.content ?? "" }));
+}
 
 function App() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -49,6 +58,7 @@ function App() {
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [buildingProjects, setBuildingProjects] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     fetch("/api/projects")
@@ -72,16 +82,44 @@ function App() {
     fetch(`/api/projects/${projectId}/messages`)
       .then((res) => res.json())
       .then((body: { messages: ServerMessage[] }) => {
-        const history: Message[] = body.messages
-          .filter((m) => m.role === "user" || m.role === "assistant")
-          .map((m) => ({ role: m.role as "user" | "assistant", content: m.content ?? "" }));
-        setMessagesByProject((prev) => ({ ...prev, [projectId]: history }));
+        setMessagesByProject((prev) => ({ ...prev, [projectId]: toDisplayMessages(body.messages) }));
         setLoadedHistoryFor((prev) => new Set(prev).add(projectId));
       })
       .catch((error) => {
         setLoadError(error instanceof Error ? error.message : "Failed to load chat history");
       });
   }, [selectedProjectId, loadedHistoryFor]);
+
+  // While a /build is running for the currently selected project, poll for
+  // the interim/result messages it posts — there's no live streaming yet
+  // (see docs/designs/wire-agents-into-chat.md), just plain polling scoped
+  // to whichever project is on screen. Stops once a terminal-tagged
+  // message ([build:done]/[build:failed]/[build:question]) shows up.
+  useEffect(() => {
+    if (!selectedProjectId || !buildingProjects[selectedProjectId]) return;
+    const projectId = selectedProjectId;
+
+    const interval = setInterval(() => {
+      fetch(`/api/projects/${projectId}/messages`)
+        .then((res) => res.json())
+        .then((body: { messages: ServerMessage[] }) => {
+          const fresh = toDisplayMessages(body.messages);
+          const knownCount = messagesByProject[projectId]?.length ?? 0;
+          const newOnes = fresh.slice(knownCount);
+          if (newOnes.length === 0) return;
+
+          setMessagesByProject((prev) => ({ ...prev, [projectId]: fresh }));
+          if (newOnes.some((m) => BUILD_TERMINAL_PATTERN.test(m.content))) {
+            setBuildingProjects((prev) => ({ ...prev, [projectId]: false }));
+          }
+        })
+        .catch((error) => {
+          setLoadError(error instanceof Error ? error.message : "Failed to poll build progress");
+        });
+    }, BUILD_POLL_INTERVAL_MS);
+
+    return () => clearInterval(interval);
+  }, [selectedProjectId, buildingProjects, messagesByProject]);
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId) ?? null;
   const messages = selectedProjectId ? (messagesByProject[selectedProjectId] ?? []) : [];
@@ -173,6 +211,15 @@ function App() {
         role: "assistant",
         content: body.reply ?? "(empty response)",
       });
+
+      // Keyed off the reply's own tag, not which command was typed — works
+      // for both /build (rare: only if a plan is somehow accepted inline)
+      // and /proceed without special-casing either one. A [build:review]
+      // reply means nothing is running yet, so it correctly does NOT
+      // start polling.
+      if (BUILD_PROGRESS_PATTERN.test(body.reply ?? "")) {
+        setBuildingProjects((prev) => ({ ...prev, [selectedProjectId]: true }));
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Network error";
       appendMessage(selectedProjectId, { role: "error", content: message });
@@ -186,8 +233,8 @@ function App() {
       <header className="chat-header">
         <h1>App Builder — Chat</h1>
         <p className="chat-subtitle">
-          Talking directly to the configured GLM endpoint. No app-generation
-          logic is wired in yet.
+          Chat normally, or send <code>/build &lt;description&gt;</code> to
+          propose a plan — reply <code>/proceed</code> to actually build it.
         </p>
 
         <div className="project-bar">

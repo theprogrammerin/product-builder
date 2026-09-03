@@ -2,7 +2,7 @@
 import "dotenv/config";
 import path from "node:path";
 import { GlmClient, loadGlmConfig } from "@app-builder/llm-client";
-import { runCodegenLoop } from "./agent.js";
+import { runCodegenAgent } from "./agent.js";
 import { createDockerRunner } from "./dockerExec.js";
 import { buildSystemPrompt, loadBuildSpec } from "./promptContext.js";
 import { createFileTools } from "./tools.js";
@@ -15,7 +15,7 @@ function parseArgs(argv: string[]): { workspace: string; spec: string } {
     if (key && value) args[key] = value;
   }
   if (!args.workspace || !args.spec) {
-    throw new Error("Usage: codegen-agent --workspace <path-to-scaffolded-project> --spec <path-to-build-spec.json>");
+    throw new Error("Usage: codegen-agent --workspace <path-to-scaffolded-project> --spec <path-to-build-spec.md>");
   }
   return { workspace: args.workspace, spec: args.spec };
 }
@@ -24,18 +24,19 @@ async function main() {
   const { workspace, spec } = parseArgs(process.argv.slice(2));
   const workspaceRoot = path.resolve(workspace);
   const backendRoot = path.join(workspaceRoot, "backend");
+  const specPath = path.resolve(spec);
 
   const config = loadGlmConfig();
   const llmClient = new GlmClient(config);
   const systemPrompt = await buildSystemPrompt();
-  const buildSpec = await loadBuildSpec(path.resolve(spec));
+  const buildSpec = await loadBuildSpec(specPath);
   const fileTools = createFileTools(backendRoot);
   const dockerRunner = createDockerRunner(workspaceRoot);
 
-  console.log(`Running Codegen Agent on ${workspaceRoot} for resource "${buildSpec.resource}"...`);
+  console.log(`Running Codegen Agent on ${workspaceRoot} using spec ${specPath}...`);
 
   try {
-    const result = await runCodegenLoop({
+    const result = await runCodegenAgent({
       llmClient,
       systemPrompt,
       buildSpec,
@@ -55,16 +56,13 @@ async function main() {
     console.log(
       `\n${result.converged ? "Model signaled done" : "Hit max iterations"} after ${result.iterations} iteration(s).`,
     );
-    console.log("Running final verification: bundle exec rspec ...");
+    console.log("Final verification (bundle exec rspec):");
+    console.log(result.verifyOutput);
 
-    const verification = await dockerRunner.run("bundle exec rspec");
-    console.log(verification.stdout);
-    if (verification.stderr) console.error(verification.stderr);
-
-    if (verification.exitCode === 0) {
-      console.log("PASS — rspec succeeded.");
+    if (result.testsPassed) {
+      console.log(`PASS — ${result.verifySummary}`);
     } else {
-      console.log(`FAIL — rspec exited ${verification.exitCode}.`);
+      console.log(`FAIL — ${result.verifySummary}`);
       process.exitCode = 1;
     }
   } finally {

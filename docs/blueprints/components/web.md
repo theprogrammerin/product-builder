@@ -26,14 +26,26 @@ own UI.
   fetched from `GET /api/projects/:id/messages` (persisted in Postgres)
   and used to seed the cache; messages sent afterward are appended
   locally rather than re-fetched.
+- `buildingProjects`: which projects currently have a `/build` in flight.
+  Set right after a `/build` submission (unless the reply is itself a
+  terminal `[build:...]` tag, e.g. the empty-description guidance).
+  Drives a polling `useEffect` (`GET /api/projects/:id/messages` every 4s,
+  currently-selected project only) that appends new tail messages and
+  clears the flag once one matches `/^\[build:(done|failed|question)\]/`
+  — see [wire-agents-into-chat.md](../../designs/wire-agents-into-chat.md).
+  Plain HTTP polling, not SSE/WebSocket.
 
 ## Known limitations
 
 - No routing (single page).
-- No automated tests yet.
+- No automated tests yet — verified manually through the actual browser
+  for the `/build` flow (see the design record's Outcome section).
 - History is fetched once per project per page load (tracked via
   `loadedHistoryFor`) — a message added by another client/tab wouldn't
   appear without a full reload.
+- Build progress polling only runs for the currently-selected project;
+  switching away mid-build and back won't resume live updates until a
+  full page reload.
 
 ## Running it
 

@@ -37,7 +37,14 @@ function runDockerCompose(workspaceRoot: string, args: string[]): Promise<Comman
 export function createDockerRunner(workspaceRoot: string, service = "rails"): DockerRunner {
   return {
     run(command) {
-      return runDockerCompose(workspaceRoot, ["run", "--rm", service, "bash", "-lc", command]);
+      // -T: no pseudo-TTY, since this output is parsed/read, not watched
+      // live — standard hygiene for non-interactive command execution.
+      // On its own this did NOT stop Jest from colorizing its summary
+      // (neither did CI=true alone) — that needed FORCE_COLOR=0 set on
+      // the frontend service in docker-compose.yml, which chalk/
+      // supports-color (what Jest uses internally) honors
+      // unconditionally. See docs/designs/frontend-generation.md.
+      return runDockerCompose(workspaceRoot, ["run", "--rm", "-T", service, "bash", "-lc", command]);
     },
     down() {
       return runDockerCompose(workspaceRoot, ["down"]);

@@ -29,6 +29,37 @@ collapse them into a single turn.
    component blueprint(s), and `CHANGELOG.md` (see below) — and marking
    the backlog row `done`.
 
+## Bug workflow (mandatory)
+
+Whenever a bug is reported, follow this sequence in order — the same
+discipline as the feature workflow above, applied to bugs. Do not skip
+ahead to fixing. Steps 2, 3+4, and 5 are checkpoints — stop and get the
+user's explicit agreement before moving to the next one; don't collapse
+them into a single turn.
+
+1. **Log it**: add a row to the "Bugs" table in
+   [`docs/backlog.md`](docs/backlog.md), status `reported`, describing the
+   observed behavior.
+2. **Prioritize**: discuss and agree with the user where it sits relative
+   to other pending backlog items. Update status to `prioritized` once
+   agreed.
+3. **Root cause + feature-set impact**: identify the root cause, and
+   describe whether/how the fix changes
+   [`docs/blueprints/features.md`](docs/blueprints/features.md) — from the
+   user's point of view — before writing any code.
+4. **Architecture impact**: describe whether/how the fix changes
+   [`docs/blueprints/architecture.md`](docs/blueprints/architecture.md) —
+   which components are affected. Present 3 and 4 together, then get
+   agreement.
+5. **Design doc**: once the user agrees on the root cause and the fix
+   approach, copy [`docs/designs/TEMPLATE.md`](docs/designs/TEMPLATE.md) to
+   `docs/designs/<bug-slug>.md`, fill it in, and get it agreed. Update the
+   backlog row to `in design`, then `fixing` once the doc is agreed.
+6. **Fix**: only after the design doc is agreed. Landing the fix also
+   means updating `docs/blueprints/features.md`, the relevant component
+   blueprint(s), and `CHANGELOG.md` (see below) — and marking the backlog
+   row `fixed`.
+
 ## Docs
 
 - Blueprints under [`docs/blueprints/`](docs/blueprints/) describe the

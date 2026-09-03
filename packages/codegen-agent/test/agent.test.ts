@@ -1,10 +1,49 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ChatCompletionResult, LLMClient } from "@app-builder/llm-client";
-import { runCodegenLoop } from "../src/agent.js";
+import { defaultFrontendMaxIterations, defaultMaxIterations, runCodegenAgent, runCodegenLoop } from "../src/agent.js";
 import type { DockerRunner } from "../src/dockerExec.js";
 import type { FileTools } from "../src/tools.js";
 
-const buildSpec = { resource: "Task", fields: [{ name: "title", type: "string" }] };
+const buildSpec = "## Resource\nTask\n\n## Fields\n- title: string\n";
+
+const multiResourceSpec =
+  "## Resource\nList\n\n## Fields\n- name: string\n\n## Associations\n- has_many :items\n\n" +
+  "## Resource\nItem\n\n## Fields\n- title: string\n\n## Associations\n- belongs_to :list\n";
+
+describe("defaultMaxIterations", () => {
+  it("stays at the proven single-resource floor for a one-resource spec", () => {
+    expect(defaultMaxIterations(buildSpec)).toBe(25);
+  });
+
+  it("scales up for a multi-resource spec (bug/feature: multi-resource-support)", () => {
+    expect(defaultMaxIterations(multiResourceSpec)).toBe(40);
+  });
+
+  it("falls back to the floor for a spec with no recognizable ## Resource heading", () => {
+    expect(defaultMaxIterations("just some free text, no headings")).toBe(25);
+  });
+});
+
+describe("defaultFrontendMaxIterations", () => {
+  const twoScreenSpec =
+    "## Resource\nTask\n\n## Fields\n- title: string\n\n## Screens\n" +
+    "### Task List\nObjective: ...\nShows: ...\n\n### Task Edit\nObjective: ...\nShows: ...\n";
+
+  it("stays at the higher frontend floor for a small number of screens", () => {
+    // 2 screens * 15 < the 40 floor, so the floor wins.
+    expect(defaultFrontendMaxIterations(twoScreenSpec)).toBe(40);
+  });
+
+  it("scales up for a spec with many screens", () => {
+    const manyScreens =
+      "## Screens\n" + Array.from({ length: 6 }, (_, i) => `### Screen ${i}\nObjective: ...\nShows: ...`).join("\n\n");
+    expect(defaultFrontendMaxIterations(manyScreens)).toBe(90); // 6 * 15
+  });
+
+  it("falls back to the floor for a spec with no recognizable ### screen heading", () => {
+    expect(defaultFrontendMaxIterations("just some free text, no headings")).toBe(40);
+  });
+});
 
 function fakeFileTools(): FileTools & { writeFile: ReturnType<typeof vi.fn> } {
   return {
@@ -30,6 +69,96 @@ function llmClientReturning(...results: ChatCompletionResult[]): LLMClient & {
   results.forEach((result) => chat.mockImplementationOnce(async () => result));
   return { chat };
 }
+
+describe("runCodegenAgent", () => {
+  it("reports success and parses the rspec summary when the final verification passes", async () => {
+    const fileTools = fakeFileTools();
+    const dockerRunner = fakeDockerRunner();
+    dockerRunner.run = vi.fn(async (command: string) =>
+      command === "bundle exec rspec"
+        ? { exitCode: 0, stdout: "..............\n\n31 examples, 0 failures\n", stderr: "" }
+        : { exitCode: 0, stdout: "ok", stderr: "" },
+    );
+    const llmClient = llmClientReturning({ message: { role: "assistant", content: "done" }, finishReason: "stop" });
+
+    const result = await runCodegenAgent({ llmClient, systemPrompt: "system", buildSpec, fileTools, dockerRunner });
+
+    expect(result.testsPassed).toBe(true);
+    expect(result.verifySummary).toBe("31 examples, 0 failures");
+    expect(dockerRunner.run).toHaveBeenCalledWith("bundle exec rspec");
+  });
+
+  it("reports failure when the final verification's exit code is non-zero", async () => {
+    const fileTools = fakeFileTools();
+    const dockerRunner = fakeDockerRunner();
+    dockerRunner.run = vi.fn(async (command: string) =>
+      command === "bundle exec rspec"
+        ? { exitCode: 1, stdout: "...F\n\n1) failure\n\n31 examples, 1 failure\n", stderr: "" }
+        : { exitCode: 0, stdout: "ok", stderr: "" },
+    );
+    const llmClient = llmClientReturning({ message: { role: "assistant", content: "done" }, finishReason: "stop" });
+
+    const result = await runCodegenAgent({ llmClient, systemPrompt: "system", buildSpec, fileTools, dockerRunner });
+
+    expect(result.testsPassed).toBe(false);
+    expect(result.verifySummary).toBe("31 examples, 1 failure");
+  });
+
+  it("falls back to the exit code when rspec's summary line can't be found", async () => {
+    const fileTools = fakeFileTools();
+    const dockerRunner = fakeDockerRunner();
+    dockerRunner.run = vi.fn(async (command: string) =>
+      command === "bundle exec rspec"
+        ? { exitCode: 1, stdout: "", stderr: "boom" }
+        : { exitCode: 0, stdout: "ok", stderr: "" },
+    );
+    const llmClient = llmClientReturning({ message: { role: "assistant", content: "done" }, finishReason: "stop" });
+
+    const result = await runCodegenAgent({ llmClient, systemPrompt: "system", buildSpec, fileTools, dockerRunner });
+
+    expect(result.testsPassed).toBe(false);
+    expect(result.verifySummary).toBe("bundle exec rspec exited 1");
+  });
+
+  it("uses a custom verifyCommand (e.g. the frontend phase's npx jest) instead of bundle exec rspec", async () => {
+    const fileTools = fakeFileTools();
+    const dockerRunner = fakeDockerRunner();
+    // Jest's own summary reporter writes to stderr, not stdout — a real
+    // run went unreported as its actual "18 passed, 3 failed" and fell
+    // back to a bare exit-code message every time until this was fixed
+    // to search both streams.
+    dockerRunner.run = vi.fn(async (command: string) =>
+      command === "npx jest"
+        ? { exitCode: 0, stdout: "", stderr: "Tests: 3 passed, 3 total\n" }
+        : { exitCode: 0, stdout: "ok", stderr: "" },
+    );
+    const llmClient = llmClientReturning({ message: { role: "assistant", content: "done" }, finishReason: "stop" });
+
+    const result = await runCodegenAgent({
+      llmClient,
+      systemPrompt: "system",
+      buildSpec,
+      fileTools,
+      dockerRunner,
+      verifyCommand: "npx jest",
+    });
+
+    expect(result.testsPassed).toBe(true);
+    expect(result.verifySummary).toBe("Tests: 3 passed, 3 total");
+    expect(dockerRunner.run).toHaveBeenCalledWith("npx jest");
+    expect(dockerRunner.run).not.toHaveBeenCalledWith("bundle exec rspec");
+  });
+
+  it("does not tear down the docker runner itself — that stays the caller's job", async () => {
+    const fileTools = fakeFileTools();
+    const dockerRunner = fakeDockerRunner();
+    const llmClient = llmClientReturning({ message: { role: "assistant", content: "done" }, finishReason: "stop" });
+
+    await runCodegenAgent({ llmClient, systemPrompt: "system", buildSpec, fileTools, dockerRunner });
+
+    expect(dockerRunner.down).not.toHaveBeenCalled();
+  });
+});
 
 describe("runCodegenLoop", () => {
   it("executes a write_file tool call, feeds the result back, and stops when the model responds with plain text", async () => {

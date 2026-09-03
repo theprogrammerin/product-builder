@@ -1,24 +1,26 @@
-# Structural placeholder — see backend/Dockerfile. Bringing this stack up
-# for real (bundle installed image, migrations run) is Phase 1 work.
+# `rails`/`sidekiq`/`frontend` bind-mount their own directory so the
+# Codegen Agent's file writes are visible inside a container immediately,
+# with no image rebuild between iterations. The agent runs one-off
+# commands via `docker compose run --rm <service> <command>` — it does
+# not `up` these services, since their CMD expects a bundled/installed,
+# working app that doesn't exist yet at the start of a run.
 #
-# `rails`/`sidekiq` bind-mount ./backend so the Codegen Agent's file
-# writes are visible inside a container immediately, with no image
-# rebuild between iterations. The agent runs one-off commands via
-# `docker compose run --rm rails <command>` — it does not `up` the
-# `rails` service itself, since its CMD expects a bundled, working app
-# that doesn't exist yet at the start of a run.
+# `bundle_cache`/`frontend_node_modules` are named volumes (not bind
+# mounts) for each side's install path — `docker compose run --rm` gives
+# each command a fresh, ephemeral container, so without these, packages
+# installed by one `bundle install`/`npm install` call would vanish
+# before the next command ran. See
+# docs/designs/codegen-agent-milestone-1.md and
+# docs/designs/frontend-generation.md.
 #
-# `bundle_cache` is a named volume (not a bind mount) for the gem install
-# path (/usr/local/bundle) — `docker compose run --rm` gives each command
-# a fresh, ephemeral container, so without this, gems installed by one
-# `bundle install` call would vanish before the next command ran.
-#
-# No service publishes a host port: rails/sidekiq only need to reach
-# mysql/mongo/redis by service name over the compose-internal network,
-# never from the host. Publishing fixed host ports meant two projects'
-# stacks could never run at the same time — the second one would fail to
-# start with "port already allocated" the moment the first project's
-# containers were still up (or left running from a prior CLI invocation).
+# No service publishes a host port: none of them need to be reached from
+# the host, only from each other (rails/sidekiq reach mysql/mongo/redis)
+# or not at all (frontend's Jest suite mocks its API client — see
+# stack-spec/guidelines/testing.md). Publishing fixed host ports meant
+# two projects' stacks could never run at the same time — the second one
+# would fail to start with "port already allocated" the moment the first
+# project's containers were still up (or left running from a prior CLI
+# invocation).
 services:
   rails:
     build: ./backend
@@ -59,5 +61,21 @@ services:
   redis:
     image: redis:7
 
+  frontend:
+    build: ./frontend
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    environment:
+      # Jest colorizes its summary line by default, which breaks a plain
+      # string match on "Tests: ..." and adds noise to what the agent
+      # itself sees in run_command output. CI=true alone didn't suppress
+      # it here (neither did dropping the pseudo-TTY) — FORCE_COLOR=0 is
+      # what chalk/supports-color (what Jest uses internally) actually
+      # honors unconditionally. See docs/designs/frontend-generation.md.
+      CI: "true"
+      FORCE_COLOR: "0"
+
 volumes:
   bundle_cache:
+  frontend_node_modules:
