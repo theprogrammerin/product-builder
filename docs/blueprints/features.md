@@ -139,6 +139,31 @@ quirk, and a typo along the way.
   loses that result.
 - Design record: [`wire-agents-into-chat.md`](../designs/wire-agents-into-chat.md)
 
+## Running a generated project — `/run` and `/stop`
+
+Once a project's build has finished writing its app, it starts running
+automatically — no separate "now go run it" step. `/run` and `/stop` give
+manual control any time after that:
+
+- `/run`: starts the project's app (or reports its current live URLs if
+  it's already running — a safe way to ask "is it running?" without
+  restarting anything). Replies `[run:live] Your app is running —
+  <component>: <url>, ...` listing every component the project actually
+  has, not a fixed backend/frontend pair.
+- `/stop`: stops the running containers, freeing their ports. The
+  project's code and data are untouched — this only pauses the
+  containers, it doesn't remove them or their volumes, so a follow-up
+  `/run` restarts quickly without re-running migrations against an empty
+  database.
+- If `/run` fails (e.g. a port conflict, a migration error), the reply is
+  `[run:failed] <reason>` — the underlying containers, if any came up,
+  are left running for inspection rather than torn down silently.
+- Running and verifying a freshly-built app happen at the same time, not
+  one after the other: once the app is fully written, its final test
+  suite and the Run Agent's startup both begin immediately, so a live
+  preview doesn't wait on every test being confirmed passing first.
+- Design record: [`run-deploy-agent.md`](../designs/run-deploy-agent.md)
+
 ## Health check
 
 - `GET /api/health` reports the configured GLM `baseUrl`/`model` without

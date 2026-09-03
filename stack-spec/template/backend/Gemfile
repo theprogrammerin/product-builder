@@ -4,6 +4,14 @@ ruby "~> 3.3"
 
 # Versions locked per stack-spec/versions.yaml — do not upgrade/downgrade.
 gem "rails", "~> 7.1.0"
+# `rails new` normally adds this itself — this template was hand-assembled
+# without it, and it went unnoticed because verification only ever runs
+# `bundle exec rspec`, never `rails server` for real. The Run Agent
+# (docs/designs/run-deploy-agent.md) is the first thing that actually
+# boots the server, and it fails immediately without a server gem
+# ("Could not find a server gem") — found via live verification, not
+# theory.
+gem "puma", "~> 6.4"
 gem "mysql2"
 gem "mongoid", "~> 8.0"
 gem "redis"

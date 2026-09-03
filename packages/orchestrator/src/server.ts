@@ -4,6 +4,7 @@ import { createApp } from "./app.js";
 import { createDb, ensureSchema, loadDatabaseUrl } from "./db.js";
 import { createPostgresChatStore } from "./postgresChatStore.js";
 import { createPostgresProjectStore } from "./postgresProjectStore.js";
+import { createPostgresRunStore } from "./postgresRunStore.js";
 import { loadScaffoldConfig } from "./scaffold.js";
 
 async function main() {
@@ -18,6 +19,10 @@ async function main() {
     { baseUrl: config.baseUrl, model: config.model },
     createPostgresChatStore(db),
     createPostgresProjectStore(db),
+    undefined,
+    undefined,
+    undefined,
+    createPostgresRunStore(db),
   );
 
   const port = Number(process.env.PORT ?? 4000);

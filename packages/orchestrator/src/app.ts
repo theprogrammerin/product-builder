@@ -13,14 +13,17 @@ import {
   createFileTools,
   defaultFrontendMaxIterations,
   runCodegenAgent,
+  runCodegenLoop,
   type AgentEvent,
 } from "@app-builder/codegen-agent";
+import { createRunAgent, type ComponentResult, type RunAgent } from "@app-builder/run-agent";
 import { createInMemoryStore, type ChatSessionStore } from "./chatStore.js";
 import {
   createInMemoryProjectStore,
   isProjectStage,
   type ProjectStore,
 } from "./projectStore.js";
+import { createInMemoryRunStore, type RunStore } from "./runStore.js";
 import { loadScaffoldConfig, scaffoldProject } from "./scaffold.js";
 
 export type Scaffold = (projectId: string) => Promise<string>;
@@ -36,15 +39,31 @@ const SYSTEM_PROMPT =
   "e.g. `/build a task tracker with a title and due date` — which " +
   "proposes a plan (resources and screens) for review; reply `/proceed` " +
   "to actually build that plan, or send a new `/build` to try a " +
-  "different one. For everything else, just chat normally.";
+  "different one. Once it's written, your app starts running " +
+  "automatically — `/run` reports the live URLs (or restarts it if it's " +
+  "stopped) and `/stop` shuts it down without touching your code or " +
+  "data. For everything else, just chat normally.";
 
 const BUILD_PREFIX = "/build";
 const PROCEED_COMMAND = "/proceed";
+const RUN_COMMAND = "/run";
+const STOP_COMMAND = "/stop";
 
 export type IntakeOutcome = { kind: "question" | "spec"; content: string };
 export type CodegenOutcome =
   | { kind: "done"; content: string }
   | { kind: "failed"; content: string };
+
+/**
+ * Reported by the codegen phase once the frontend is written (backend
+ * already verified passing) — the point at which the Run Agent starts
+ * concurrently with final verification, not after it. See
+ * docs/designs/run-deploy-agent.md.
+ */
+export type RunOutcome =
+  | { kind: "pending" }
+  | { kind: "live"; components: ComponentResult[] }
+  | { kind: "failed"; error: string };
 
 export type RunIntakePhase = (params: {
   description: string;
@@ -55,8 +74,14 @@ export type RunCodegenPhase = (params: {
   workspacePath: string;
   buildSpec: string;
   llmClient: LLMClient;
+  runAgent: RunAgent;
   onProgress: (content: string) => void;
+  onRunOutcome: (outcome: RunOutcome) => void;
 }) => Promise<CodegenOutcome>;
+
+function formatComponentList(components: ComponentResult[]): string {
+  return components.map((c) => `${c.name}: ${c.url}`).join(", ");
+}
 
 /** Thin wrapper around the Intake Agent — one fast LLM call, always awaited directly. */
 export const defaultRunIntakePhase: RunIntakePhase = async ({ description, llmClient }) => {
@@ -73,7 +98,9 @@ export const defaultRunCodegenPhase: RunCodegenPhase = async ({
   workspacePath,
   buildSpec,
   llmClient,
+  runAgent,
   onProgress,
+  onRunOutcome,
 }) => {
   const forward = (event: AgentEvent) => {
     if (event.type === "assistant_message" && event.content) onProgress(event.content);
@@ -81,6 +108,9 @@ export const defaultRunCodegenPhase: RunCodegenPhase = async ({
 
   const backendDocker = createDockerRunner(workspacePath, "rails");
   const frontendDocker = createDockerRunner(workspacePath, "frontend");
+  // Only torn down if the Run Agent didn't leave a live instance behind —
+  // see the `finally` block below.
+  let instanceIsLive = false;
 
   try {
     const backendResult = await runCodegenAgent({
@@ -101,25 +131,53 @@ export const defaultRunCodegenPhase: RunCodegenPhase = async ({
 
     onProgress(`Backend complete — ${backendResult.verifySummary}. Starting the frontend...`);
 
-    const frontendResult = await runCodegenAgent({
+    // The loop (writes code) is split from the final verify command
+    // (below) — once the app is written, verifying it and running it
+    // happen at the same time, not one after the other. See
+    // docs/designs/run-deploy-agent.md.
+    const loopResult = await runCodegenLoop({
       llmClient,
       systemPrompt: await buildFrontendSystemPrompt(),
       buildSpec,
       fileTools: createFileTools(path.join(workspacePath, "frontend")),
       dockerRunner: frontendDocker,
       maxIterations: defaultFrontendMaxIterations(buildSpec),
-      verifyCommand: "npx jest",
       onEvent: forward,
     });
 
-    return frontendResult.testsPassed
+    onProgress("Frontend written — verifying and starting your app...");
+    onRunOutcome({ kind: "pending" });
+
+    const [verification, startResult] = await Promise.all([
+      frontendDocker.run("npx jest"),
+      runAgent.start({ workspacePath }),
+    ]);
+
+    if (startResult.status === "live") {
+      instanceIsLive = true;
+      onRunOutcome({ kind: "live", components: startResult.components });
+    } else {
+      onRunOutcome({ kind: "failed", error: startResult.error ?? "Unknown error starting your app." });
+    }
+
+    // Same stdout+stderr search as runCodegenAgent's own verify step —
+    // duplicated here rather than reusing it because that helper also
+    // owns running the command, and this command now runs concurrently
+    // with the Run Agent's start(), not sequentially after the loop.
+    const combinedOutput = `${verification.stdout}\n${verification.stderr}`;
+    const verifySummary =
+      combinedOutput.match(/^\d+ examples?, \d+ failures?.*$/m)?.[0] ??
+      combinedOutput.match(/^Tests:.*$/m)?.[0] ??
+      `npx jest exited ${verification.exitCode}`;
+
+    return verification.exitCode === 0
       ? {
           kind: "done",
-          content: `Build complete — backend: ${backendResult.verifySummary}; frontend: ${frontendResult.verifySummary}`,
+          content: `Build complete — backend: ${backendResult.verifySummary}; frontend: ${verifySummary}`,
         }
       : {
           kind: "failed",
-          content: `Frontend build finished but tests did not pass after ${frontendResult.iterations} iteration(s): ${frontendResult.verifySummary}`,
+          content: `Frontend build finished but tests did not pass after ${loopResult.iterations} iteration(s): ${verifySummary}`,
         };
   } catch (error) {
     return {
@@ -127,9 +185,12 @@ export const defaultRunCodegenPhase: RunCodegenPhase = async ({
       content: `Build failed: ${error instanceof Error ? error.message : String(error)}`,
     };
   } finally {
-    // docker compose down tears down the whole stack (both services) —
-    // one call covers it regardless of which runner it's called on.
-    await backendDocker.down();
+    // docker compose down tears down the whole stack — but if the Run
+    // Agent just brought the app up live, that's the opposite of what
+    // should happen here. Only clean up the ephemeral dependency
+    // containers a `run --rm` build leaves behind when nothing is
+    // actually meant to stay running.
+    if (!instanceIsLive) await backendDocker.down();
   }
 };
 
@@ -146,6 +207,8 @@ export function createApp(
   scaffold: Scaffold = defaultScaffold,
   runIntakePhase: RunIntakePhase = defaultRunIntakePhase,
   runCodegenPhase: RunCodegenPhase = defaultRunCodegenPhase,
+  runStore: RunStore = createInMemoryRunStore(),
+  runAgent: RunAgent = createRunAgent(),
 ): Express {
   const app = express();
   app.use(express.json());
@@ -155,6 +218,9 @@ export function createApp(
   // docs/designs/wire-agents-into-chat.md and docs/designs/frontend-generation.md.
   const buildingProjects = new Set<string>();
   const pendingSpecs = new Map<string, string>();
+  // Guards manual /run and /stop against racing each other or a build's
+  // own automatic Run Agent trigger for the same project.
+  const runningOps = new Set<string>();
 
   app.get("/api/health", (_req, res) => {
     res.json({
@@ -343,8 +409,25 @@ export function createApp(
         workspacePath: project.workspacePath,
         buildSpec,
         llmClient,
+        runAgent,
         onProgress: (content) => {
           chatStore.append(projectId, [{ role: "assistant", content: `[build] ${content}` }]).catch(() => {});
+        },
+        onRunOutcome: (outcome) => {
+          if (outcome.kind === "pending") {
+            runStore.setStatus(projectId, "starting").catch(() => {});
+            chatStore.append(projectId, [{ role: "assistant", content: "[run] Starting your app..." }]).catch(() => {});
+          } else if (outcome.kind === "live") {
+            runStore.setLive(projectId, outcome.components).catch(() => {});
+            chatStore
+              .append(projectId, [
+                { role: "assistant", content: `[run:live] Your app is running — ${formatComponentList(outcome.components)}` },
+              ])
+              .catch(() => {});
+          } else {
+            runStore.setStatus(projectId, "failed", outcome.error).catch(() => {});
+            chatStore.append(projectId, [{ role: "assistant", content: `[run:failed] ${outcome.error}` }]).catch(() => {});
+          }
         },
       })
         .then((outcome) =>
@@ -362,6 +445,111 @@ export function createApp(
         )
         .finally(() => buildingProjects.delete(projectId));
 
+      return;
+    }
+
+    if (trimmed === RUN_COMMAND) {
+      if (buildingProjects.has(projectId)) {
+        const notice: ChatMessage = {
+          role: "assistant",
+          content: "[run] A build is in progress — your app will start automatically once it's ready.",
+        };
+        await chatStore.append(projectId, [userMessage, notice]);
+        res.json({ reply: notice.content, finishReason: "stop" });
+        return;
+      }
+      if (runningOps.has(projectId)) {
+        const notice: ChatMessage = {
+          role: "assistant",
+          content: "[run] Already working on this — please wait.",
+        };
+        await chatStore.append(projectId, [userMessage, notice]);
+        res.json({ reply: notice.content, finishReason: "stop" });
+        return;
+      }
+
+      const existing = await runStore.get(projectId);
+      if (existing?.status === "live") {
+        const notice: ChatMessage = {
+          role: "assistant",
+          content: `[run:live] Already running — ${formatComponentList(existing.components)}`,
+        };
+        await chatStore.append(projectId, [userMessage, notice]);
+        res.json({ reply: notice.content, finishReason: "stop" });
+        return;
+      }
+      if (existing?.status === "starting") {
+        const notice: ChatMessage = { role: "assistant", content: "[run] Still starting — please wait." };
+        await chatStore.append(projectId, [userMessage, notice]);
+        res.json({ reply: notice.content, finishReason: "stop" });
+        return;
+      }
+
+      const ack: ChatMessage = { role: "assistant", content: "[run] Starting your app..." };
+      await chatStore.append(projectId, [userMessage, ack]);
+      res.json({ reply: ack.content, finishReason: "stop" });
+
+      runningOps.add(projectId);
+      runStore.setStatus(projectId, "starting").catch(() => {});
+      runAgent
+        .start({ workspacePath: project.workspacePath })
+        .then((result) => {
+          if (result.status === "live") {
+            return runStore.setLive(projectId, result.components).then(() =>
+              chatStore.append(projectId, [
+                { role: "assistant", content: `[run:live] Your app is running — ${formatComponentList(result.components)}` },
+              ]),
+            );
+          }
+          return runStore
+            .setStatus(projectId, "failed", result.error)
+            .then(() => chatStore.append(projectId, [{ role: "assistant", content: `[run:failed] ${result.error}` }]));
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          return runStore
+            .setStatus(projectId, "failed", message)
+            .then(() =>
+              chatStore.append(projectId, [{ role: "assistant", content: `[run:failed] Unexpected error: ${message}` }]),
+            );
+        })
+        .finally(() => runningOps.delete(projectId));
+
+      return;
+    }
+
+    if (trimmed === STOP_COMMAND) {
+      if (buildingProjects.has(projectId) || runningOps.has(projectId)) {
+        const notice: ChatMessage = {
+          role: "assistant",
+          content: "Already working on this project — please wait, then try /stop again.",
+        };
+        await chatStore.append(projectId, [userMessage, notice]);
+        res.json({ reply: notice.content, finishReason: "stop" });
+        return;
+      }
+
+      const existing = await runStore.get(projectId);
+      if (!existing || existing.status !== "live") {
+        const notice: ChatMessage = { role: "assistant", content: "Nothing is running for this project." };
+        await chatStore.append(projectId, [userMessage, notice]);
+        res.json({ reply: notice.content, finishReason: "stop" });
+        return;
+      }
+
+      runningOps.add(projectId);
+      try {
+        await runAgent.stop({ workspacePath: project.workspacePath });
+        await runStore.setStatus(projectId, "stopped");
+        const notice: ChatMessage = {
+          role: "assistant",
+          content: "[stop:done] Stopped — your data and code are untouched.",
+        };
+        await chatStore.append(projectId, [userMessage, notice]);
+        res.json({ reply: notice.content, finishReason: "stop" });
+      } finally {
+        runningOps.delete(projectId);
+      }
       return;
     }
 

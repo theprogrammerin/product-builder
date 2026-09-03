@@ -40,6 +40,14 @@ const NEW_PROJECT_OPTION = "__new__";
 const BUILD_POLL_INTERVAL_MS = 4000;
 const BUILD_TERMINAL_PATTERN = /^\[build:(done|failed|question|review)\]/;
 const BUILD_PROGRESS_PATTERN = /^\[build\]/;
+// The Run Agent's outcome is independent of the build's — see
+// docs/designs/run-deploy-agent.md — so it can arrive before, after, or
+// interleaved with [build:done]/[build:failed]. [run:pending] means one
+// is definitely coming; polling can't stop on a [build:...] tag alone
+// until that one has landed too (or never fired at all, e.g. the backend
+// failed before ever reaching the frontend/run fork).
+const RUN_PENDING_PATTERN = /^\[run\] Starting your app/;
+const RUN_TERMINAL_PATTERN = /^\[run:(live|failed)\]/;
 
 function toDisplayMessages(serverMessages: ServerMessage[]): Message[] {
   return serverMessages
@@ -90,11 +98,16 @@ function App() {
       });
   }, [selectedProjectId, loadedHistoryFor]);
 
-  // While a /build is running for the currently selected project, poll for
-  // the interim/result messages it posts — there's no live streaming yet
-  // (see docs/designs/wire-agents-into-chat.md), just plain polling scoped
-  // to whichever project is on screen. Stops once a terminal-tagged
-  // message ([build:done]/[build:failed]/[build:question]) shows up.
+  // While a /build, /proceed, or /run is running for the currently
+  // selected project, poll for the interim/result messages it posts —
+  // there's no live streaming yet (see docs/designs/wire-agents-into-chat.md),
+  // just plain polling scoped to whichever project is on screen. The
+  // Run Agent's outcome is independent of the build's (see
+  // docs/designs/run-deploy-agent.md) — [run:live]/[run:failed] can land
+  // before, after, or interleaved with [build:done]/[build:failed] — so
+  // this can't stop on the first terminal tag it sees; it waits for every
+  // outcome that was actually announced (a [run] "Starting your app..."
+  // message means a [run:live]/[run:failed] is still owed).
   useEffect(() => {
     if (!selectedProjectId || !buildingProjects[selectedProjectId]) return;
     const projectId = selectedProjectId;
@@ -109,7 +122,15 @@ function App() {
           if (newOnes.length === 0) return;
 
           setMessagesByProject((prev) => ({ ...prev, [projectId]: fresh }));
-          if (newOnes.some((m) => BUILD_TERMINAL_PATTERN.test(m.content))) {
+
+          const buildPending =
+            fresh.some((m) => BUILD_PROGRESS_PATTERN.test(m.content)) &&
+            !fresh.some((m) => BUILD_TERMINAL_PATTERN.test(m.content));
+          const runPending =
+            fresh.some((m) => RUN_PENDING_PATTERN.test(m.content)) &&
+            !fresh.some((m) => RUN_TERMINAL_PATTERN.test(m.content));
+
+          if (!buildPending && !runPending) {
             setBuildingProjects((prev) => ({ ...prev, [projectId]: false }));
           }
         })
@@ -213,11 +234,10 @@ function App() {
       });
 
       // Keyed off the reply's own tag, not which command was typed — works
-      // for both /build (rare: only if a plan is somehow accepted inline)
-      // and /proceed without special-casing either one. A [build:review]
-      // reply means nothing is running yet, so it correctly does NOT
-      // start polling.
-      if (BUILD_PROGRESS_PATTERN.test(body.reply ?? "")) {
+      // for /proceed and standalone /run without special-casing either
+      // one. A [build:review] reply means nothing is running yet, so it
+      // correctly does NOT start polling.
+      if (BUILD_PROGRESS_PATTERN.test(body.reply ?? "") || RUN_PENDING_PATTERN.test(body.reply ?? "")) {
         setBuildingProjects((prev) => ({ ...prev, [selectedProjectId]: true }));
       }
     } catch (error) {
@@ -235,6 +255,9 @@ function App() {
         <p className="chat-subtitle">
           Chat normally, or send <code>/build &lt;description&gt;</code> to
           propose a plan — reply <code>/proceed</code> to actually build it.
+          Once it's written, your app starts running automatically;
+          <code>/run</code> reports the live URLs and <code>/stop</code>{" "}
+          shuts it down.
         </p>
 
         <div className="project-bar">

@@ -1,12 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import request from "supertest";
 import type { ChatCompletionRequest, ChatCompletionResult, LLMClient } from "@app-builder/llm-client";
+import type { RunAgent, StartResult } from "@app-builder/run-agent";
 import {
   createApp,
   type CodegenOutcome,
   type IntakeOutcome,
   type RunCodegenPhase,
   type RunIntakePhase,
+  type RunOutcome,
   type Scaffold,
 } from "../src/app.js";
 
@@ -31,11 +33,29 @@ function fakeRunIntakePhase(outcome: IntakeOutcome): RunIntakePhase & ReturnType
 function fakeRunCodegenPhase(
   outcome: CodegenOutcome,
   progress: string[] = [],
+  runOutcomes: RunOutcome[] = [],
 ): RunCodegenPhase & ReturnType<typeof vi.fn> {
-  return vi.fn(async ({ onProgress }) => {
+  return vi.fn(async ({ onProgress, onRunOutcome }) => {
     for (const message of progress) onProgress(message);
+    for (const runOutcome of runOutcomes) onRunOutcome(runOutcome);
     return outcome;
   });
+}
+
+function fakeRunAgent(overrides: Partial<RunAgent> = {}): RunAgent & {
+  start: ReturnType<typeof vi.fn>;
+  stop: ReturnType<typeof vi.fn>;
+} {
+  return {
+    start: vi.fn(
+      async (): Promise<StartResult> => ({
+        status: "live",
+        components: [{ name: "rails", port: 41000, url: "http://localhost:41000" }],
+      }),
+    ),
+    stop: vi.fn(async () => {}),
+    ...overrides,
+  };
 }
 
 /** Lets the fire-and-forget build promise chain (including its chatStore.append calls) settle. */
@@ -483,5 +503,222 @@ describe("POST /api/chat — /proceed (build phase)", () => {
 
     resolveFirst({ kind: "done", content: "done" });
     await flush();
+  });
+
+  it("posts [run:pending] then [run:live] as the Codegen phase reports them, independently of the build outcome", async () => {
+    const runIntakePhase = fakeRunIntakePhase({ kind: "spec", content: "## Resource\nTask\n" });
+    const runCodegenPhase = fakeRunCodegenPhase(
+      { kind: "done", content: "Build complete" },
+      [],
+      [
+        { kind: "pending" },
+        { kind: "live", components: [{ name: "rails", port: 41000, url: "http://localhost:41000" }] },
+      ],
+    );
+    const app = createApp(
+      fakeLlmClient(),
+      healthInfo,
+      undefined,
+      undefined,
+      fakeScaffold(),
+      runIntakePhase,
+      runCodegenPhase,
+    );
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    await setUpPendingSpec(app, projectId);
+    await request(app).post("/api/chat").send({ projectId, message: "/proceed" });
+    await flush();
+
+    const history = await request(app).get(`/api/projects/${projectId}/messages`);
+    const contents = history.body.messages.map((m: { content: string }) => m.content);
+    expect(contents).toContain("[run] Starting your app...");
+    expect(contents).toContain("[run:live] Your app is running — rails: http://localhost:41000");
+
+    // Confirmed via runStore, not just the chat log — /run should now
+    // report "already running" instead of starting a fresh one.
+    const runAgain = await request(app).post("/api/chat").send({ projectId, message: "/run" });
+    expect(runAgain.body.reply).toBe("[run:live] Already running — rails: http://localhost:41000");
+  });
+
+  it("reports a [run:failed] outcome without affecting the [build:...] outcome", async () => {
+    const runIntakePhase = fakeRunIntakePhase({ kind: "spec", content: "## Resource\nTask\n" });
+    const runCodegenPhase = fakeRunCodegenPhase(
+      { kind: "done", content: "Build complete" },
+      [],
+      [{ kind: "pending" }, { kind: "failed", error: "docker compose up failed: port in use" }],
+    );
+    const app = createApp(
+      fakeLlmClient(),
+      healthInfo,
+      undefined,
+      undefined,
+      fakeScaffold(),
+      runIntakePhase,
+      runCodegenPhase,
+    );
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    await setUpPendingSpec(app, projectId);
+    await request(app).post("/api/chat").send({ projectId, message: "/proceed" });
+    await flush();
+
+    const history = await request(app).get(`/api/projects/${projectId}/messages`);
+    const contents = history.body.messages.map((m: { content: string }) => m.content);
+    expect(contents).toContain("[run:failed] docker compose up failed: port in use");
+    expect(contents).toContain("[build:done] Build complete");
+  });
+});
+
+describe("POST /api/chat — /run", () => {
+  it("starts the app and reports the live component URLs", async () => {
+    const runAgent = fakeRunAgent();
+    const app = createApp(
+      fakeLlmClient(),
+      healthInfo,
+      undefined,
+      undefined,
+      fakeScaffold(),
+      undefined,
+      undefined,
+      undefined,
+      runAgent,
+    );
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    const ack = await request(app).post("/api/chat").send({ projectId, message: "/run" });
+    expect(ack.body.reply).toBe("[run] Starting your app...");
+    await flush();
+
+    expect(runAgent.start).toHaveBeenCalledWith({ workspacePath: `/fake/workspace/${projectId}` });
+    const history = await request(app).get(`/api/projects/${projectId}/messages`);
+    expect(history.body.messages.at(-1).content).toBe(
+      "[run:live] Your app is running — rails: http://localhost:41000",
+    );
+  });
+
+  it("reports already-live status without starting a second instance", async () => {
+    const runAgent = fakeRunAgent();
+    const app = createApp(
+      fakeLlmClient(),
+      healthInfo,
+      undefined,
+      undefined,
+      fakeScaffold(),
+      undefined,
+      undefined,
+      undefined,
+      runAgent,
+    );
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    await request(app).post("/api/chat").send({ projectId, message: "/run" });
+    await flush();
+    const second = await request(app).post("/api/chat").send({ projectId, message: "/run" });
+
+    expect(second.body.reply).toBe("[run:live] Already running — rails: http://localhost:41000");
+    expect(runAgent.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a failure from the Run Agent as [run:failed]", async () => {
+    const runAgent = fakeRunAgent({
+      start: vi.fn(async (): Promise<StartResult> => ({ status: "failed", components: [], error: "port in use" })),
+    });
+    const app = createApp(
+      fakeLlmClient(),
+      healthInfo,
+      undefined,
+      undefined,
+      fakeScaffold(),
+      undefined,
+      undefined,
+      undefined,
+      runAgent,
+    );
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    await request(app).post("/api/chat").send({ projectId, message: "/run" });
+    await flush();
+
+    const history = await request(app).get(`/api/projects/${projectId}/messages`);
+    expect(history.body.messages.at(-1).content).toBe("[run:failed] port in use");
+  });
+
+  it("declines to start while a build is in progress for the same project", async () => {
+    const runIntakePhase = fakeRunIntakePhase({ kind: "spec", content: "## Resource\nTask\n" });
+    let resolveFirst!: (outcome: CodegenOutcome) => void;
+    const runCodegenPhase: RunCodegenPhase = vi.fn(
+      () => new Promise<CodegenOutcome>((resolve) => (resolveFirst = resolve)),
+    );
+    const runAgent = fakeRunAgent();
+    const app = createApp(
+      fakeLlmClient(),
+      healthInfo,
+      undefined,
+      undefined,
+      fakeScaffold(),
+      runIntakePhase,
+      runCodegenPhase,
+      undefined,
+      runAgent,
+    );
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    await request(app).post("/api/chat").send({ projectId, message: `/build ## Resource\nTask\n` });
+    await request(app).post("/api/chat").send({ projectId, message: "/proceed" });
+
+    const response = await request(app).post("/api/chat").send({ projectId, message: "/run" });
+    expect(response.body.reply).toContain("build is in progress");
+    expect(runAgent.start).not.toHaveBeenCalled();
+
+    resolveFirst({ kind: "done", content: "done" });
+    await flush();
+  });
+});
+
+describe("POST /api/chat — /stop", () => {
+  it("stops a live instance", async () => {
+    const runAgent = fakeRunAgent();
+    const app = createApp(
+      fakeLlmClient(),
+      healthInfo,
+      undefined,
+      undefined,
+      fakeScaffold(),
+      undefined,
+      undefined,
+      undefined,
+      runAgent,
+    );
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    await request(app).post("/api/chat").send({ projectId, message: "/run" });
+    await flush();
+
+    const response = await request(app).post("/api/chat").send({ projectId, message: "/stop" });
+
+    expect(response.body.reply).toBe("[stop:done] Stopped — your data and code are untouched.");
+    expect(runAgent.stop).toHaveBeenCalledWith({ workspacePath: `/fake/workspace/${projectId}` });
+
+    // Confirmed via runStore, not just the reply: a follow-up /run treats
+    // it as stopped, not still live.
+    const runAfterStop = await request(app).post("/api/chat").send({ projectId, message: "/run" });
+    expect(runAfterStop.body.reply).toBe("[run] Starting your app...");
+  });
+
+  it("reports nothing running when nothing has ever been started", async () => {
+    const app = createApp(fakeLlmClient(), healthInfo, undefined, undefined, fakeScaffold());
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    const response = await request(app).post("/api/chat").send({ projectId, message: "/stop" });
+    expect(response.body.reply).toBe("Nothing is running for this project.");
   });
 });

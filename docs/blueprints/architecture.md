@@ -22,6 +22,9 @@ flowchart LR
     Orchestrator -->|"/build: runCodegenAgent()"| Codegen["packages/codegen-agent"]
     Codegen -->|reads| StackSpec
     Codegen -->|"docker compose run --rm rails"| Workspace
+    Orchestrator -->|"/run, /stop, and automatically once a build finishes writing"| RunAgent["packages/run-agent"]
+    RunAgent -->|"docker compose up -d / stop"| Workspace
+    RunAgent -->|"status, ports, urls"| Postgres
     Intake --> LLMClient
     Codegen --> LLMClient
     Dev(("Developer, CLI")) -.->|"standalone: --description / --spec"| Intake
@@ -55,6 +58,14 @@ flowchart LR
   build-spec the Codegen Agent reads, or a single clarifying question if
   the description doesn't have enough in it.
   → [blueprint](./components/intake-agent.md)
+- **[`packages/run-agent`](../../packages/run-agent)** — given a
+  project's own `docker-compose.yml`, discovers which services should be
+  exposed (a one-to-many `project → components` mapping, not a fixed
+  backend/frontend pair), allocates each a free host port, migrates the
+  database, brings the stack up, and health-checks every URL. Triggered
+  automatically once a build finishes writing its app (concurrently with
+  final verification, not after it) and by `/run`/`/stop`.
+  → [blueprint](./components/run-agent.md)
 - **[`stack-spec/`](../../stack-spec)** — `guidelines/` are now consumed
   programmatically (the Codegen Agent's system prompt); `template/`
   provides a real `rails new` backend skeleton plus a still-bare frontend
@@ -101,10 +112,16 @@ Six components, long term:
 5. **Orchestrator Service** — `/build` proves the core Intake → Codegen
    wiring works end-to-end; still needs accounts, real streaming (today's
    progress is polled, not pushed), durable job persistence across a
-   restart, and delivery.
+   restart, and delivery (git push/zip).
 6. **Web Chat UI** — `/build` progress currently renders as more chat
    messages, polled while a build is in flight; still needs a proper
    progress view, file tree, and delivery step.
+
+Not one of the original six, but built ahead of the original Phase 4
+plan: the **Run Agent** (`packages/run-agent`) delivers the "live
+preview" half of Phase 4 early — a docker-compose-based live URL, not a
+git-push/zip delivery. Follow-up iteration against an already-built
+project is still ahead.
 
 Locked stack for *generated* apps (not this builder tool itself): Rails +
 MySQL + MongoDB + Redis/Sidekiq backend, Expo/React Native + Zustand +

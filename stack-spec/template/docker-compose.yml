@@ -13,24 +13,29 @@
 # docs/designs/codegen-agent-milestone-1.md and
 # docs/designs/frontend-generation.md.
 #
-# No service publishes a host port: none of them need to be reached from
-# the host, only from each other (rails/sidekiq reach mysql/mongo/redis)
-# or not at all (frontend's Jest suite mocks its API client — see
-# stack-spec/guidelines/testing.md). Publishing fixed host ports meant
-# two projects' stacks could never run at the same time — the second one
-# would fail to start with "port already allocated" the moment the first
-# project's containers were still up (or left running from a prior CLI
-# invocation).
+# rails/frontend declare a host port via an env var placeholder
+# (${RAILS_HOST_PORT}/${FRONTEND_HOST_PORT}), not a fixed number —
+# `docker compose run --rm` (the Codegen Agent's own usage) doesn't
+# publish a service's declared ports at all unless --service-ports is
+# passed, so those calls are unaffected either way. Only `docker compose
+# up -d` (the Run Agent — see docs/designs/run-deploy-agent.md) sets
+# these per invocation, picking a free host port itself, so concurrently
+# running projects still don't collide the way a fixed port would.
 services:
   rails:
     build: ./backend
     volumes:
       - ./backend:/app
       - bundle_cache:/usr/local/bundle
+    ports:
+      - "${RAILS_HOST_PORT}:3000"
     depends_on:
-      - mysql
-      - mongo
-      - redis
+      mysql:
+        condition: service_healthy
+      mongo:
+        condition: service_started
+      redis:
+        condition: service_started
     environment:
       MYSQL_HOST: mysql
       MONGO_URI: mongodb://mongo:27017/app_development
@@ -42,18 +47,34 @@ services:
       - bundle_cache:/usr/local/bundle
     command: ["bundle", "exec", "sidekiq"]
     depends_on:
-      - redis
-      - mysql
-      - mongo
+      mysql:
+        condition: service_healthy
+      mongo:
+        condition: service_started
+      redis:
+        condition: service_started
     environment:
       MYSQL_HOST: mysql
       MONGO_URI: mongodb://mongo:27017/app_development
 
+  # A plain `depends_on: [mysql]` only waits for the container to start,
+  # not for MySQL itself to accept connections — `docker compose up -d`
+  # returns as soon as the process launches, well before first-boot
+  # initialization finishes. That race is real, not theoretical: the Run
+  # Agent's migration step (docs/designs/run-deploy-agent.md) hit
+  # "Can't connect to server on 'mysql' (115)" against a freshly started
+  # container during live verification. The healthcheck + condition below
+  # makes both `up -d` and `run --rm` actually wait for MySQL to be ready.
   mysql:
     image: mysql:8.0
     environment:
       MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
       MYSQL_DATABASE: app_development
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
 
   mongo:
     image: mongo:7.0
@@ -66,6 +87,8 @@ services:
     volumes:
       - ./frontend:/app
       - frontend_node_modules:/app/node_modules
+    ports:
+      - "${FRONTEND_HOST_PORT}:8081"
     environment:
       # Jest colorizes its summary line by default, which breaks a plain
       # string match on "Tests: ..." and adds noise to what the agent

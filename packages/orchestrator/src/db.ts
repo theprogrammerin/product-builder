@@ -39,6 +39,22 @@ const SCHEMA_SQL = `
     tool_calls TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   );
+
+  CREATE TABLE IF NOT EXISTS running_instances (
+    project_id TEXT PRIMARY KEY REFERENCES projects(id),
+    status TEXT NOT NULL,
+    last_error TEXT,
+    started_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+
+  CREATE TABLE IF NOT EXISTS running_components (
+    project_id TEXT NOT NULL REFERENCES running_instances(project_id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    port INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    PRIMARY KEY (project_id, name)
+  );
 `;
 
 /** Idempotent — safe to call on every startup. No migration framework for two tables. */

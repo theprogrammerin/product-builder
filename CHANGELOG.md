@@ -7,6 +7,44 @@ together.
 
 ## Unreleased
 
+### Run Agent — `/run` and `/stop` (feature request #10)
+
+A generated project can finally be seen running, not just verified by its
+test suite. Once a build finishes writing its app, the Run Agent starts
+it live automatically — concurrently with final verification, not after
+it — and `/run`/`/stop` give manual control any time afterward. Verified
+live 2026-09-03 against a real, previously-built generated project: real
+Docker, dynamically allocated ports, both components reachable over real
+HTTP, a stop → restart cycle confirmed fast and data-preserving.
+
+- `packages/run-agent` (new): discovers a project's exposable components
+  straight from its own `docker-compose.yml` (any service with a
+  `${<NAME>_HOST_PORT}` port placeholder) — a one-to-many
+  `project → components` mapping, not a fixed backend/frontend pair —
+  allocates each a free host port, migrates the database, brings the
+  stack up, and health-checks every URL.
+- `packages/orchestrator`: new `/run`/`/stop` chat commands; the
+  frontend codegen phase's code-writing loop is now split from its final
+  verify step so the Run Agent's `start()` can run concurrently with
+  verification instead of after it. New `running_instances`/
+  `running_components` Postgres tables (`runStore.ts`/
+  `postgresRunStore.ts`).
+- `stack-spec/template/docker-compose.yml`: `rails`/`frontend` now
+  publish a host port via an env var the Run Agent sets per invocation
+  (`docker compose run --rm`, the Codegen Agent's own usage, is
+  unaffected — it never publishes declared ports at all).
+- Two real bugs found only by running this live (not by unit tests, which
+  mock Docker): `docker compose up -d` doesn't wait for MySQL to actually
+  be ready, just for its container to start — fixed with a real Compose
+  healthcheck + `depends_on: condition: service_healthy`; the generated
+  backend's `Gemfile` never included a web server gem, unnoticed until
+  now because verification never actually booted `rails server` — fixed
+  by adding `puma`.
+- Bug #5 (`react-dom`/`react-native-web` missing from the frontend
+  template, blocking `expo start --web`) fixed as a hard prerequisite of
+  this feature.
+- Design record: [`docs/designs/run-deploy-agent.md`](docs/designs/run-deploy-agent.md)
+
 ### Phase 3, Milestone 1 — `/build` wires the Intake + Codegen Agents into chat (feature request #7)
 
 A chat message starting with `/build <description>` now actually
