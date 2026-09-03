@@ -48,6 +48,8 @@ const BUILD_PROGRESS_PATTERN = /^\[build\]/;
 // failed before ever reaching the frontend/run fork).
 const RUN_PENDING_PATTERN = /^\[run\] Starting your app/;
 const RUN_TERMINAL_PATTERN = /^\[run:(live|failed)\]/;
+const DEBUG_PROGRESS_PATTERN = /^\[debug\]/;
+const DEBUG_TERMINAL_PATTERN = /^\[debug:(done|failed)\]/;
 
 function toDisplayMessages(serverMessages: ServerMessage[]): Message[] {
   return serverMessages
@@ -129,8 +131,11 @@ function App() {
           const runPending =
             fresh.some((m) => RUN_PENDING_PATTERN.test(m.content)) &&
             !fresh.some((m) => RUN_TERMINAL_PATTERN.test(m.content));
+          const debugPending =
+            fresh.some((m) => DEBUG_PROGRESS_PATTERN.test(m.content)) &&
+            !fresh.some((m) => DEBUG_TERMINAL_PATTERN.test(m.content));
 
-          if (!buildPending && !runPending) {
+          if (!buildPending && !runPending && !debugPending) {
             setBuildingProjects((prev) => ({ ...prev, [projectId]: false }));
           }
         })
@@ -234,10 +239,14 @@ function App() {
       });
 
       // Keyed off the reply's own tag, not which command was typed — works
-      // for /proceed and standalone /run without special-casing either
-      // one. A [build:review] reply means nothing is running yet, so it
-      // correctly does NOT start polling.
-      if (BUILD_PROGRESS_PATTERN.test(body.reply ?? "") || RUN_PENDING_PATTERN.test(body.reply ?? "")) {
+      // for /proceed, standalone /run, and /debug without special-casing
+      // any of them. A [build:review] reply means nothing is running yet,
+      // so it correctly does NOT start polling.
+      if (
+        BUILD_PROGRESS_PATTERN.test(body.reply ?? "") ||
+        RUN_PENDING_PATTERN.test(body.reply ?? "") ||
+        DEBUG_PROGRESS_PATTERN.test(body.reply ?? "")
+      ) {
         setBuildingProjects((prev) => ({ ...prev, [selectedProjectId]: true }));
       }
     } catch (error) {
@@ -257,7 +266,9 @@ function App() {
           propose a plan — reply <code>/proceed</code> to actually build it.
           Once it's written, your app starts running automatically;
           <code>/run</code> reports the live URLs and <code>/stop</code>{" "}
-          shuts it down.
+          shuts it down. If something's wrong,{" "}
+          <code>/debug &lt;description&gt;</code> investigates and fixes it
+          (or run it with no description for a general health check).
         </p>
 
         <div className="project-bar">

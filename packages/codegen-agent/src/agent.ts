@@ -1,4 +1,4 @@
-import type { ChatMessage, LLMClient } from "@app-builder/llm-client";
+import type { ChatMessage, LLMClient, ToolDefinition } from "@app-builder/llm-client";
 import type { DockerRunner } from "./dockerExec.js";
 import { TOOL_DEFINITIONS, type FileTools } from "./tools.js";
 
@@ -28,6 +28,17 @@ export interface RunOptions {
    * Only consulted by runCodegenAgent, not runCodegenLoop itself.
    */
   verifyCommand?: string;
+  /**
+   * Overrides the tool schema shown to the model — same five tool
+   * *names* dispatch through executeTool() either way, only the
+   * descriptions shown to the model change. Needed by
+   * @app-builder/debug-agent: its fileTools root is the whole project
+   * (so it can reach CLAUDE.md/docs/backlog.md, not just backend/ or
+   * frontend/), so the stock descriptions ("relative to the project's
+   * backend/ root") would be actively wrong for it. Defaults to
+   * TOOL_DEFINITIONS, unchanged for every existing caller.
+   */
+  toolDefinitions?: ToolDefinition[];
 }
 
 // Proven sufficient for one resource in Milestone 1. Floor for the
@@ -98,6 +109,7 @@ export async function runCodegenLoop(options: RunOptions): Promise<RunResult> {
     dockerRunner,
     maxIterations = defaultMaxIterations(buildSpec),
     onEvent,
+    toolDefinitions = TOOL_DEFINITIONS,
   } = options;
 
   const messages: ChatMessage[] = [
@@ -108,7 +120,7 @@ export async function runCodegenLoop(options: RunOptions): Promise<RunResult> {
   for (let iteration = 0; iteration < maxIterations; iteration++) {
     const result = await llmClient.chat({
       messages,
-      tools: TOOL_DEFINITIONS,
+      tools: toolDefinitions,
       maxTokens: DEFAULT_MAX_TOKENS,
     });
     messages.push(result.message);

@@ -164,6 +164,37 @@ manual control any time after that:
   preview doesn't wait on every test being confirmed passing first.
 - Design record: [`run-deploy-agent.md`](../designs/run-deploy-agent.md)
 
+## Investigating and fixing issues — `/debug`
+
+`/debug [description]` investigates an already-built project — a
+reported problem, or (with no description) a general health check across
+both sides — finds the root cause, fixes it, and re-verifies for real
+before reporting back:
+
+- With a description: investigates that specific report (e.g.
+  `/debug toggling a task's done status doesn't save`).
+- With no description: a general sweep — current test status on both
+  sides, plus (if the project is currently running via the Run Agent)
+  its live components' recent logs.
+- Every real issue it finds and fixes gets logged as a row in **that
+  project's own `docs/backlog.md` "Bugs" table** — the same governance
+  copy every project is scaffolded with (feature #1) — following that
+  project's own `CLAUDE.md` Bug workflow: a small, self-contained fix
+  goes straight to `fixed` with no design doc; anything larger gets one,
+  copied from that project's own `docs/designs/TEMPLATE.md`. The
+  generated project ends up with a real bug history, not silent patches.
+- Replies `[debug:done] <summary>` or `[debug:failed] <summary>` — the
+  latter can mean either the specific issue wasn't actually resolved, or
+  (honestly) that the reported issue *was* fixed but some other,
+  unrelated part of the app still doesn't pass — re-verification always
+  covers both sides' full test suites, not just what was touched.
+- Guarded the same way `/build`/`/proceed` are — one code-mutating
+  operation per project at a time.
+- Verified live 2026-09-03: a real backend bug (a dropped field in a
+  controller's permitted params) was found, fixed, and logged correctly
+  by a real LLM run — see design doc.
+- Design record: [`debug-agent.md`](../designs/debug-agent.md)
+
 ## Health check
 
 - `GET /api/health` reports the configured GLM `baseUrl`/`model` without

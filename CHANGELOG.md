@@ -7,6 +7,45 @@ together.
 
 ## Unreleased
 
+### Debug Agent — `/debug` (feature request #11)
+
+A generated project can now be fixed, not just built. `/debug
+<description>` investigates a reported problem in an already-built
+project (or, with no description, runs a general health check); `/debug`
+reuses the Codegen Agent's tool-calling loop in two scoped passes
+(backend, then frontend) rather than duplicating it. Every real issue it
+finds and fixes gets logged into *that project's own* `docs/backlog.md`
+Bugs table, following that project's own copy of the mandatory Bug
+workflow — the same discipline this repo holds itself to.
+
+- `packages/debug-agent` (new): `runDebugAgent()` — assembles initial
+  context (both sides' current test status, plus live container logs if
+  the project is running via the Run Agent), runs a backend pass then a
+  frontend pass, re-verifies both sides for real, and reports `fixed`
+  only if both fully pass (an honest signal: a specific reported bug can
+  be genuinely fixed while an unrelated, pre-existing failure elsewhere
+  correctly keeps `fixed: false`).
+- `packages/codegen-agent`: small, additive `toolDefinitions?` override
+  added to `runCodegenLoop`'s `RunOptions` (default: the existing
+  `TOOL_DEFINITIONS`, every existing caller unaffected) — needed because
+  the Debug Agent's file-tools root is the whole project (so it can reach
+  `CLAUDE.md`/`docs/backlog.md`), not just `backend/`/`frontend/`, making
+  the stock tool descriptions actively wrong for it.
+- `packages/orchestrator`: new `/debug` chat command, structurally
+  identical to `/proceed` (ack, interim `[debug]` narration, terminal
+  `[debug:done]`/`[debug:failed]`), pulling the project's live component
+  list from `runStore` when the Run Agent has it running.
+- Bug #8 (the scaffolding template's own `CLAUDE.md`/`docs/backlog.md`
+  never received the Bug workflow section this repo added to itself)
+  fixed as a hard prerequisite — every generated project now ships with
+  it.
+- Verified live 2026-09-03: a real backend bug (a dropped field in a
+  controller's permitted params, breaking 2 of 21 rspec examples) was
+  found, fixed, and logged correctly by a real LLM run against an
+  already-built generated project — a two-file, surgical footprint, no
+  design doc created (correctly, for a small fix), no unrelated changes.
+- Design record: [`docs/designs/debug-agent.md`](docs/designs/debug-agent.md)
+
 ### Run Agent — `/run` and `/stop` (feature request #10)
 
 A generated project can finally be seen running, not just verified by its

@@ -5,8 +5,10 @@ import type { RunAgent, StartResult } from "@app-builder/run-agent";
 import {
   createApp,
   type CodegenOutcome,
+  type DebugOutcome,
   type IntakeOutcome,
   type RunCodegenPhase,
+  type RunDebugPhase,
   type RunIntakePhase,
   type RunOutcome,
   type Scaffold,
@@ -38,6 +40,16 @@ function fakeRunCodegenPhase(
   return vi.fn(async ({ onProgress, onRunOutcome }) => {
     for (const message of progress) onProgress(message);
     for (const runOutcome of runOutcomes) onRunOutcome(runOutcome);
+    return outcome;
+  });
+}
+
+function fakeRunDebugPhase(
+  outcome: DebugOutcome,
+  progress: string[] = [],
+): RunDebugPhase & ReturnType<typeof vi.fn> {
+  return vi.fn(async ({ onProgress }) => {
+    for (const message of progress) onProgress(message);
     return outcome;
   });
 }
@@ -720,5 +732,242 @@ describe("POST /api/chat — /stop", () => {
 
     const response = await request(app).post("/api/chat").send({ projectId, message: "/stop" });
     expect(response.body.reply).toBe("Nothing is running for this project.");
+  });
+});
+
+describe("POST /api/chat — /debug", () => {
+  it("investigates a described problem and reports [debug:done]", async () => {
+    const runDebugPhase = fakeRunDebugPhase(
+      { kind: "done", content: "Debug complete — Backend: 20 examples, 0 failures; Frontend: Tests: 5 passed, 5 total" },
+      ["Found it — a missing null check in TaskEditScreen."],
+    );
+    const app = createApp(
+      fakeLlmClient(),
+      healthInfo,
+      undefined,
+      undefined,
+      fakeScaffold(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      runDebugPhase,
+    );
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    const ack = await request(app).post("/api/chat").send({ projectId, message: "/debug the login screen crashes" });
+    expect(ack.body.reply).toBe("[debug] Got it — looking into this. This can take a few minutes.");
+    await flush();
+
+    expect(runDebugPhase).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspacePath: `/fake/workspace/${projectId}`,
+        description: "the login screen crashes",
+      }),
+    );
+
+    const history = await request(app).get(`/api/projects/${projectId}/messages`);
+    const contents = history.body.messages.map((m: { content: string }) => m.content);
+    expect(contents).toEqual([
+      "/debug the login screen crashes",
+      "[debug] Got it — looking into this. This can take a few minutes.",
+      "[debug] Found it — a missing null check in TaskEditScreen.",
+      "[debug:done] Debug complete — Backend: 20 examples, 0 failures; Frontend: Tests: 5 passed, 5 total",
+    ]);
+  });
+
+  it("passes undefined as the description for a general sweep with no description", async () => {
+    const runDebugPhase = fakeRunDebugPhase({ kind: "done", content: "Debug complete — nothing was wrong" });
+    const app = createApp(
+      fakeLlmClient(),
+      healthInfo,
+      undefined,
+      undefined,
+      fakeScaffold(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      runDebugPhase,
+    );
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    await request(app).post("/api/chat").send({ projectId, message: "/debug" });
+    await flush();
+
+    expect(runDebugPhase).toHaveBeenCalledWith(expect.objectContaining({ description: undefined }));
+  });
+
+  it("passes the project's live component list through when the Run Agent has it running", async () => {
+    const runAgent = fakeRunAgent();
+    const runDebugPhase = fakeRunDebugPhase({ kind: "done", content: "Debug complete" });
+    const app = createApp(
+      fakeLlmClient(),
+      healthInfo,
+      undefined,
+      undefined,
+      fakeScaffold(),
+      undefined,
+      undefined,
+      undefined,
+      runAgent,
+      runDebugPhase,
+    );
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    await request(app).post("/api/chat").send({ projectId, message: "/run" });
+    await flush();
+
+    await request(app).post("/api/chat").send({ projectId, message: "/debug" });
+    await flush();
+
+    expect(runDebugPhase).toHaveBeenCalledWith(
+      expect.objectContaining({
+        liveComponents: [{ name: "rails", port: 41000, url: "http://localhost:41000" }],
+      }),
+    );
+  });
+
+  it("does not pass a live component list when nothing is running", async () => {
+    const runDebugPhase = fakeRunDebugPhase({ kind: "done", content: "Debug complete" });
+    const app = createApp(
+      fakeLlmClient(),
+      healthInfo,
+      undefined,
+      undefined,
+      fakeScaffold(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      runDebugPhase,
+    );
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    await request(app).post("/api/chat").send({ projectId, message: "/debug" });
+    await flush();
+
+    expect(runDebugPhase).toHaveBeenCalledWith(expect.objectContaining({ liveComponents: undefined }));
+  });
+
+  it("tags a still-failing outcome as [debug:failed]", async () => {
+    const runDebugPhase = fakeRunDebugPhase({ kind: "failed", content: "Investigated, but tests still don't fully pass" });
+    const app = createApp(
+      fakeLlmClient(),
+      healthInfo,
+      undefined,
+      undefined,
+      fakeScaffold(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      runDebugPhase,
+    );
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    await request(app).post("/api/chat").send({ projectId, message: "/debug something" });
+    await flush();
+
+    const history = await request(app).get(`/api/projects/${projectId}/messages`);
+    expect(history.body.messages.at(-1).content).toBe(
+      "[debug:failed] Investigated, but tests still don't fully pass",
+    );
+  });
+
+  it("catches a thrown error from the Debug phase and reports it as [debug:failed]", async () => {
+    const runDebugPhase: RunDebugPhase = vi.fn(async () => {
+      throw new Error("docker daemon not running");
+    });
+    const app = createApp(
+      fakeLlmClient(),
+      healthInfo,
+      undefined,
+      undefined,
+      fakeScaffold(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      runDebugPhase,
+    );
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    await request(app).post("/api/chat").send({ projectId, message: "/debug something" });
+    await flush();
+
+    const history = await request(app).get(`/api/projects/${projectId}/messages`);
+    expect(history.body.messages.at(-1).content).toBe(
+      "[debug:failed] Unexpected error: docker daemon not running",
+    );
+  });
+
+  it("declines to start while a build is in progress for the same project", async () => {
+    const runIntakePhase = fakeRunIntakePhase({ kind: "spec", content: "## Resource\nTask\n" });
+    let resolveFirst!: (outcome: CodegenOutcome) => void;
+    const runCodegenPhase: RunCodegenPhase = vi.fn(
+      () => new Promise<CodegenOutcome>((resolve) => (resolveFirst = resolve)),
+    );
+    const runDebugPhase = fakeRunDebugPhase({ kind: "done", content: "should not run" });
+    const app = createApp(
+      fakeLlmClient(),
+      healthInfo,
+      undefined,
+      undefined,
+      fakeScaffold(),
+      runIntakePhase,
+      runCodegenPhase,
+      undefined,
+      undefined,
+      runDebugPhase,
+    );
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    await request(app).post("/api/chat").send({ projectId, message: "/build a task tracker" });
+    await request(app).post("/api/chat").send({ projectId, message: "/proceed" });
+
+    const response = await request(app).post("/api/chat").send({ projectId, message: "/debug something" });
+    expect(response.body.reply).toContain("Already working on this project");
+    expect(runDebugPhase).not.toHaveBeenCalled();
+
+    resolveFirst({ kind: "done", content: "done" });
+    await flush();
+  });
+
+  it("declines to start a second /debug while one is already running", async () => {
+    let resolveFirst!: (outcome: DebugOutcome) => void;
+    const runDebugPhase: RunDebugPhase = vi.fn(
+      () => new Promise<DebugOutcome>((resolve) => (resolveFirst = resolve)),
+    );
+    const app = createApp(
+      fakeLlmClient(),
+      healthInfo,
+      undefined,
+      undefined,
+      fakeScaffold(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      runDebugPhase,
+    );
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    await request(app).post("/api/chat").send({ projectId, message: "/debug first" });
+    const second = await request(app).post("/api/chat").send({ projectId, message: "/debug second" });
+
+    expect(second.body.reply).toContain("Already working on this project");
+    expect(runDebugPhase).toHaveBeenCalledTimes(1);
+
+    resolveFirst({ kind: "done", content: "done" });
+    await flush();
   });
 });

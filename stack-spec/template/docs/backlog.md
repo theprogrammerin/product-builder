@@ -22,3 +22,14 @@ Status values: `proposed` → `prioritized` → `in design` → `building` → `
 
 | # | Feature | Status | Priority | Design doc |
 |---|---------|--------|----------|------------|
+
+## Bugs
+
+Bugs follow the same mandatory workflow as feature requests — see the
+"Bug workflow" in [`../CLAUDE.md`](../CLAUDE.md) — reported here first,
+then prioritized, root-caused, design-recorded, and fixed.
+
+Status values: `reported` → `prioritized` → `in design` → `fixing` → `fixed`.
+
+| # | Bug | Status | Priority | Design doc |
+|---|-----|--------|----------|------------|

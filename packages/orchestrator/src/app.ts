@@ -16,6 +16,7 @@ import {
   runCodegenLoop,
   type AgentEvent,
 } from "@app-builder/codegen-agent";
+import { runDebugAgent, type LiveComponent } from "@app-builder/debug-agent";
 import { createRunAgent, type ComponentResult, type RunAgent } from "@app-builder/run-agent";
 import { createInMemoryStore, type ChatSessionStore } from "./chatStore.js";
 import {
@@ -42,12 +43,15 @@ const SYSTEM_PROMPT =
   "different one. Once it's written, your app starts running " +
   "automatically — `/run` reports the live URLs (or restarts it if it's " +
   "stopped) and `/stop` shuts it down without touching your code or " +
-  "data. For everything else, just chat normally.";
+  "data. If something's wrong, `/debug` followed by a description " +
+  "investigates and fixes it (or run it with no description for a " +
+  "general health check). For everything else, just chat normally.";
 
 const BUILD_PREFIX = "/build";
 const PROCEED_COMMAND = "/proceed";
 const RUN_COMMAND = "/run";
 const STOP_COMMAND = "/stop";
+const DEBUG_PREFIX = "/debug";
 
 export type IntakeOutcome = { kind: "question" | "spec"; content: string };
 export type CodegenOutcome =
@@ -78,6 +82,19 @@ export type RunCodegenPhase = (params: {
   onProgress: (content: string) => void;
   onRunOutcome: (outcome: RunOutcome) => void;
 }) => Promise<CodegenOutcome>;
+
+export type DebugOutcome =
+  | { kind: "done"; content: string }
+  | { kind: "failed"; content: string };
+
+export type RunDebugPhase = (params: {
+  workspacePath: string;
+  /** No description means "do a general health check," not "nothing to look into." */
+  description?: string;
+  llmClient: LLMClient;
+  liveComponents?: LiveComponent[];
+  onProgress: (content: string) => void;
+}) => Promise<DebugOutcome>;
 
 function formatComponentList(components: ComponentResult[]): string {
   return components.map((c) => `${c.name}: ${c.url}`).join(", ");
@@ -194,6 +211,35 @@ export const defaultRunCodegenPhase: RunCodegenPhase = async ({
   }
 };
 
+/**
+ * Real implementation: the Debug Agent, investigating and fixing an
+ * already-built project — a reported problem, or a general sweep with no
+ * description. See docs/designs/debug-agent.md.
+ */
+export const defaultRunDebugPhase: RunDebugPhase = async ({
+  workspacePath,
+  description,
+  llmClient,
+  liveComponents,
+  onProgress,
+}) => {
+  const forward = (event: AgentEvent) => {
+    if (event.type === "assistant_message" && event.content) onProgress(event.content);
+  };
+
+  try {
+    const result = await runDebugAgent({ llmClient, workspacePath, description, liveComponents, onEvent: forward });
+    return result.fixed
+      ? { kind: "done", content: `Debug complete — ${result.summary}` }
+      : { kind: "failed", content: `Investigated, but tests still don't fully pass: ${result.summary}` };
+  } catch (error) {
+    return {
+      kind: "failed",
+      content: `Debug failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+};
+
 export interface HealthInfo {
   baseUrl: string;
   model: string;
@@ -209,6 +255,7 @@ export function createApp(
   runCodegenPhase: RunCodegenPhase = defaultRunCodegenPhase,
   runStore: RunStore = createInMemoryRunStore(),
   runAgent: RunAgent = createRunAgent(),
+  runDebugPhase: RunDebugPhase = defaultRunDebugPhase,
 ): Express {
   const app = express();
   app.use(express.json());
@@ -550,6 +597,60 @@ export function createApp(
       } finally {
         runningOps.delete(projectId);
       }
+      return;
+    }
+
+    if (trimmed === DEBUG_PREFIX || trimmed.startsWith(`${DEBUG_PREFIX} `)) {
+      if (buildingProjects.has(projectId) || runningOps.has(projectId)) {
+        const notice: ChatMessage = {
+          role: "assistant",
+          content: "[debug] Already working on this project — please wait, then try /debug again.",
+        };
+        await chatStore.append(projectId, [userMessage, notice]);
+        res.json({ reply: notice.content, finishReason: "stop" });
+        return;
+      }
+
+      // No description means "do a general health check," not "nothing
+      // to investigate" — unlike /build, an empty /debug is a valid,
+      // meaningful request on its own.
+      const description = trimmed.slice(DEBUG_PREFIX.length).trim() || undefined;
+
+      const ack: ChatMessage = {
+        role: "assistant",
+        content: "[debug] Got it — looking into this. This can take a few minutes.",
+      };
+      await chatStore.append(projectId, [userMessage, ack]);
+      res.json({ reply: ack.content, finishReason: "stop" });
+
+      buildingProjects.add(projectId);
+      const liveInstance = await runStore.get(projectId);
+      const liveComponents = liveInstance?.status === "live" ? liveInstance.components : undefined;
+
+      runDebugPhase({
+        workspacePath: project.workspacePath,
+        description,
+        llmClient,
+        liveComponents,
+        onProgress: (content) => {
+          chatStore.append(projectId, [{ role: "assistant", content: `[debug] ${content}` }]).catch(() => {});
+        },
+      })
+        .then((outcome) =>
+          chatStore.append(projectId, [
+            { role: "assistant", content: `[debug:${outcome.kind}] ${outcome.content}` },
+          ]),
+        )
+        .catch((error) =>
+          chatStore.append(projectId, [
+            {
+              role: "assistant",
+              content: `[debug:failed] Unexpected error: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ]),
+        )
+        .finally(() => buildingProjects.delete(projectId));
+
       return;
     }
 
