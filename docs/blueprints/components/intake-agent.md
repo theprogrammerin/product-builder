@@ -24,12 +24,23 @@ Usable two ways: the standalone CLI, or as a library —
   starts with the literal line `QUESTION:`. Retries once, silently, on a
   truly empty response before throwing `EmptyIntakeResponseError` — this
   model's hidden-reasoning token usage varies enough per call that an
-  empty result is usually transient, not a real dead end (bug #2)
+  empty result is usually transient, not a real dead end (bug #2).
+  `RunIntakeOptions.history?: ChatMessage[]` (optional — the standalone
+  CLI omits it) is inserted between the system prompt and the current
+  description, so a `/build` can reflect something said in an earlier
+  plain-chat turn (bug #17); the orchestrator is responsible for
+  filtering out noisy progress tags first, this agent just inserts
+  whatever it's handed
 - [`src/promptContext.ts`](../../../packages/intake-agent/src/promptContext.ts) —
-  the system prompt: the repeatable per-resource markdown shape (one or
-  many `## Resource` blocks), the allowed field types and
-  `belongs_to`/`has_many`/`has_one` association vocabulary, and the
-  `QUESTION:` convention
+  `buildSystemPrompt()`: the repeatable per-resource markdown shape (one
+  or many `## Resource` blocks), the allowed field types and
+  `belongs_to`/`has_many`/`has_one` association vocabulary, the
+  `QUESTION:` convention, and (for a spec response) a leading `#
+  <Feature Title>` line used downstream to name its design doc.
+  `buildIncrementalSystemPrompt(existing)` — same shape, plus the target
+  project's current `features.md`/`architecture.md`/`backlog.md`, for
+  when the request is against an already-built project — see feature
+  #18 ([intake-iteration.md](../../designs/intake-iteration.md))
 
 ## Design principle: markdown in, markdown out, no parser
 
@@ -71,9 +82,15 @@ codegen-agent --workspace <path> --spec spec.md
 
 [`test/`](../../../packages/intake-agent/test) — unit tests for
 `runIntake` (fake `LLMClient`: spec/question/empty-response/retry cases,
-`maxTokens`, message shape) and `promptContext` (the markdown shape, the
-`QUESTION:` convention, the field-type vocabulary, and the associations
-shape). Verified manually against the real GLM endpoint for the spec
-path, the clarifying-question path, and 2-/3-resource multi-resource
-specs, and end-to-end as a library through the orchestrator's `/build`
-flow (real browser UI) — see the design records.
+`maxTokens`, message shape, `history` inserted between the system prompt
+and the current description, and unaffected behavior with no `history`
+at all) and `promptContext` (the markdown shape, the `QUESTION:`
+convention, the field-type vocabulary, the associations shape, the `#
+<Feature Title>` line requirement, and `buildIncrementalSystemPrompt`'s
+delta-only framing plus verbatim inclusion of the existing-project
+context). Verified manually against the real GLM endpoint for the spec
+path, the clarifying-question path, 2-/3-resource multi-resource specs,
+(feature #18) a real incremental `/build` against an already-built
+project, and (bug #17) a real preference stated in plain chat before
+`/build` correctly showing up in the proposed plan — see the design
+records.

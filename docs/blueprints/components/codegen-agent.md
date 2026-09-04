@@ -33,7 +33,12 @@ flow calls `runCodegenAgent()` directly (see
 - [`src/tools.ts`](../../../packages/codegen-agent/src/tools.ts) —
   `read_file`/`write_file`/`list_dir`/`list_files`/`search_files` (all
   path-scoped, host-side `fs` ops against the bind-mounted `backend/`)
-  and the `run_command` tool definition
+  and the `run_command` tool definition. Also `read_project_doc`/
+  `write_project_doc` (`createProjectDocsTools`) — a fixed allowlist
+  (`docs/blueprints/features.md`, `architecture.md`, `docs/backlog.md`,
+  `CHANGELOG.md`, `docs/designs/<slug>.md`), not a general project-root
+  sandbox, appended to the tool schema only when a caller supplies
+  `projectDocsTools` — see feature #18/bug #16.
 - [`src/dockerExec.ts`](../../../packages/codegen-agent/src/dockerExec.ts) —
   runs commands via `docker compose run --rm rails <cmd>`; `down()` tears
   down dependency containers after a run
@@ -58,6 +63,28 @@ template versus left for the agent.
 The model's own "I'm done" is never trusted: the CLI always runs
 `bundle exec rspec` itself as the final, authoritative check, regardless
 of whether the loop converged or hit its iteration cap.
+
+`AgentEvent` (`assistant_message`, `tool_call`, `tool_result`,
+`empty_turn`) is how a caller observes the loop as it runs — the
+orchestrator's `forward()` turns these into chat progress. `maxTokens`
+per call is `8192` (bug #15) — matches [Intake Agent](./intake-agent.md)'s
+ceiling, since the same model spends tokens on hidden reasoning before
+visible output; too tight a budget risks a turn coming back with neither
+text nor a tool call (an "empty turn," `AgentEvent`'s `empty_turn`
+variant), which the loop nudges past rather than treating as done.
+
+`RunOptions.projectDocsTools` + a `FeatureWorkflowContext` (`featureSlug`,
+`isIncremental`) passed to `buildSystemPrompt`/`buildFrontendSystemPrompt`
+add a mandatory final step to both prompts: before finishing (success or
+not), follow the project's own Feature workflow — write/continue a real
+`docs/designs/<slug>.md`, log/update a `docs/backlog.md` row, update
+`docs/blueprints/features.md`, add a `CHANGELOG.md` entry. Both params
+are optional and only supplied by the orchestrator's `/build` flow — the
+standalone CLI omits them, so the model is never told about tools it
+doesn't actually have. Incremental mode (`isIncremental: true`) also adds
+an explicit "this app already has real code — don't break/rename/
+duplicate it" warning. See feature #18/bug #16 —
+[intake-iteration.md](../../designs/intake-iteration.md).
 
 ## CLI interface
 
@@ -89,11 +116,20 @@ this has been validated against.
 
 [`test/`](../../../packages/codegen-agent/test) — unit tests for the loop
 and `runCodegenAgent` (fake `LLMClient`/tools/docker runner —
-pass/fail/rspec-summary-parsing cases), `defaultMaxIterations`'s scaling
-formula, the file tools (real temp dirs, path-traversal rejection,
-recursive listing, grep-style search), and prompt-context building (real
-`stack-spec/` content). No Postgres or Docker required. The Docker-based
-execution and full end-to-end runs are verified manually — see the design
-records (Milestone 1's single-resource run, the multi-resource design's
-2- and 3-resource runs, and wire-agents-into-chat.md's real run through
-the orchestrator/web UI) for what that took.
+pass/fail/rspec-summary-parsing cases, `empty_turn` firing with the real
+`finishReason`, `projectDocsTools`/its two tool definitions being
+appended/dispatched correctly and an explicit `toolDefinitions` override
+still winning), `defaultMaxIterations`'s scaling formula, the file tools
+(real temp dirs, path-traversal rejection, recursive listing, grep-style
+search), `isProjectDocPath`/`createProjectDocsTools` (real temp dirs —
+the fixed allowlist, `docs/designs/<slug>.md` accepted, everything else
+rejected for both read and write), and prompt-context building (real
+`stack-spec/` content, the Feature workflow instructions appearing only
+when `featureWorkflow` is supplied, the incremental-mode warning
+appearing only when `isIncremental: true`). No Postgres or Docker
+required. The Docker-based execution and full end-to-end runs are
+verified manually — see the design records (Milestone 1's
+single-resource run, the multi-resource design's 2- and 3-resource runs,
+wire-agents-into-chat.md's real run through the orchestrator/web UI, and
+intake-iteration.md's incremental-mode + doc-writing-epilogue
+verification) for what that took.

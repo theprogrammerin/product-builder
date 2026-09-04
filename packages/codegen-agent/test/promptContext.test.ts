@@ -19,6 +19,29 @@ describe("buildSystemPrompt", () => {
     const prompt = await buildSystemPrompt();
     expect(prompt.toLowerCase()).toContain("bundle exec rspec");
   });
+
+  it("omits the Feature workflow / project-doc instructions when no featureWorkflow is given (standalone CLI)", async () => {
+    const prompt = await buildSystemPrompt();
+    expect(prompt).not.toContain("read_project_doc");
+    expect(prompt).not.toContain("write_project_doc");
+  });
+
+  it("includes the Feature workflow instructions, with the given slug, when featureWorkflow is supplied", async () => {
+    const prompt = await buildSystemPrompt(undefined, { featureSlug: "add-reminders", isIncremental: false });
+    expect(prompt).toContain('read_project_doc("docs/designs/add-reminders.md")');
+    expect(prompt).toContain('write_project_doc("docs/designs/add-reminders.md"');
+    expect(prompt).toContain("docs/backlog.md");
+    expect(prompt).toContain("docs/blueprints/features.md");
+    expect(prompt).toContain("CHANGELOG.md");
+  });
+
+  it("warns against breaking/renaming existing resources only in incremental mode", async () => {
+    const incremental = await buildSystemPrompt(undefined, { featureSlug: "x", isIncremental: true });
+    expect(incremental.toLowerCase()).toContain("already has real backend code");
+
+    const fresh = await buildSystemPrompt(undefined, { featureSlug: "x", isIncremental: false });
+    expect(fresh.toLowerCase()).not.toContain("already has real backend code");
+  });
 });
 
 describe("buildFrontendSystemPrompt", () => {
@@ -52,6 +75,26 @@ describe("buildFrontendSystemPrompt", () => {
     expect(prompt.toLowerCase()).toContain("nice-to-have");
     expect(prompt).toContain("it.skip");
     expect(prompt.toLowerCase()).toContain("never skip a must-pass test");
+  });
+
+  it("omits the Feature workflow / project-doc instructions when no featureWorkflow is given (standalone CLI)", async () => {
+    const prompt = await buildFrontendSystemPrompt();
+    expect(prompt).not.toContain("read_project_doc");
+    expect(prompt).not.toContain("write_project_doc");
+  });
+
+  it("includes the Feature workflow instructions, with the given slug, when featureWorkflow is supplied", async () => {
+    const prompt = await buildFrontendSystemPrompt(undefined, { featureSlug: "add-reminders", isIncremental: false });
+    expect(prompt).toContain('read_project_doc("docs/designs/add-reminders.md")');
+    expect(prompt).toContain('write_project_doc("docs/designs/add-reminders.md"');
+  });
+
+  it("warns against removing/restructuring existing screens only in incremental mode", async () => {
+    const incremental = await buildFrontendSystemPrompt(undefined, { featureSlug: "x", isIncremental: true });
+    expect(incremental.toLowerCase()).toContain("already has real frontend code");
+
+    const fresh = await buildFrontendSystemPrompt(undefined, { featureSlug: "x", isIncremental: false });
+    expect(fresh.toLowerCase()).not.toContain("already has real frontend code");
   });
 });
 

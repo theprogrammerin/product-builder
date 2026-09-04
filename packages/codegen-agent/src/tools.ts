@@ -109,6 +109,73 @@ export function createFileTools(root: string): FileTools {
   };
 }
 
+export interface ProjectDocsTools {
+  read(docPath: string): Promise<string>;
+  write(docPath: string, content: string): Promise<void>;
+}
+
+// Deliberately a fixed allowlist, not a general project-root sandbox
+// like the Debug Agent's — /build's own backend/frontend tools stay
+// rooted at backend/frontend exactly as before this. Only these
+// governance docs are reachable, and only by these two tools. See
+// docs/designs/intake-iteration.md.
+const PROJECT_DOC_PATTERN =
+  /^(docs\/blueprints\/features\.md|docs\/blueprints\/architecture\.md|docs\/backlog\.md|CHANGELOG\.md|docs\/designs\/[a-z0-9-]+\.md)$/;
+
+export function isProjectDocPath(docPath: string): boolean {
+  return PROJECT_DOC_PATTERN.test(docPath);
+}
+
+export function createProjectDocsTools(workspaceRoot: string): ProjectDocsTools {
+  return {
+    async read(docPath) {
+      if (!isProjectDocPath(docPath)) throw new Error(`Not a project doc path: ${docPath}`);
+      return readFile(path.join(workspaceRoot, docPath), "utf8").catch(() => "(does not exist yet)");
+    },
+    async write(docPath, content) {
+      if (!isProjectDocPath(docPath)) throw new Error(`Not a project doc path: ${docPath}`);
+      const resolved = path.join(workspaceRoot, docPath);
+      await mkdir(path.dirname(resolved), { recursive: true });
+      await writeFile(resolved, content, "utf8");
+    },
+  };
+}
+
+export const PROJECT_DOCS_TOOL_DEFINITIONS: ToolDefinition[] = [
+  {
+    type: "function",
+    function: {
+      name: "read_project_doc",
+      description:
+        "Read one of this project's own governance docs: docs/blueprints/features.md, " +
+        "docs/blueprints/architecture.md, docs/backlog.md, CHANGELOG.md, or docs/designs/<slug>.md. " +
+        "Returns \"(does not exist yet)\" if the file isn't there yet (e.g. a design doc for a new feature).",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "write_project_doc",
+      description:
+        "Write (overwrite) one of the same governance docs — creates docs/designs/<slug>.md if it " +
+        "doesn't exist yet. Use this to follow this project's own Feature workflow before finishing.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          content: { type: "string" },
+        },
+        required: ["path", "content"],
+      },
+    },
+  },
+];
+
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: "function",

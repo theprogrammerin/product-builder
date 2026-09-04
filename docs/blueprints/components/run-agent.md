@@ -45,7 +45,12 @@ Run Agent discovers however many components a project's own
 3. If a `rails` component is present: `docker compose run --rm rails
    bin/rails db:create db:migrate`.
 4. `docker compose up -d <components>`, with each one's `<NAME>_HOST_PORT`
-   env var set to its freshly allocated port.
+   env var set to its freshly allocated port, *and* a `<NAME>_URL` (the
+   component's full `http://localhost:<port>`) for every component,
+   passed to every other one too — so any service's `environment:` block
+   can reference any other component's real URL regardless of which of
+   those services it itself is (feature #17; see
+   [stack-spec guideline](../../../stack-spec/guidelines/component-networking.md)).
 5. Health-check every component's URL; report `{ status: "live",
    components }` or `{ status: "failed", error }`.
 
@@ -68,6 +73,25 @@ gap found the same way: the generated backend's `Gemfile` never included a
 web server gem (`rails server` needs `puma`), unnoticed until now because
 verification only ever ran `bundle exec rspec`. Fixed in
 [`stack-spec/template/backend/Gemfile`](../../../stack-spec/template/backend/Gemfile).
+
+A third gap, found live much later (bug #12): the Run Agent allocates a
+fresh, unpredictable `RAILS_HOST_PORT` on every `start()`, but nothing
+propagated it into the `frontend` component — its API client fell back to
+a hardcoded `http://localhost:3000/api/v1` default, which only happened
+to work when the allocated port landed on exactly 3000. First patched
+ad hoc (`EXPO_PUBLIC_API_BASE_URL: http://localhost:${RAILS_HOST_PORT}/api/v1`),
+then properly generalized as feature #17: the Run Agent now computes a
+`<NAME>_URL` for every component and passes it to every other component
+too, and `docker-compose.yml` references `${RAILS_URL}` generically
+instead. This also gave bug #13 (missing CORS — a generated backend's
+`cors.rb` was the framework's default commented-out stub, so the
+frontend could never complete a real request regardless of port) a real
+fix: the template now ships `rack-cors` configured to read the allowed
+origin from `FRONTEND_ORIGIN` (itself sourced from `${FRONTEND_URL}`).
+Live re-verified end-to-end on a real generated project: the served
+frontend bundle embeds the real allocated backend URL, and the app loads
+real data in the browser with no CORS or connection error. See
+[component-networking.md](../../designs/component-networking.md).
 
 ## Known limitations
 

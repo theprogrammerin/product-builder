@@ -35,6 +35,45 @@ describe("runIntake", () => {
     });
   });
 
+  it("inserts prior chat history between the system prompt and the current description (bug #17)", async () => {
+    const llmClient = llmClientReturning({
+      message: { role: "assistant", content: "## Resource\nTask\n" },
+      finishReason: "stop",
+    });
+    const history = [
+      { role: "user" as const, content: "I want it to use email/password login" },
+      { role: "assistant" as const, content: "Got it, noted for later." },
+    ];
+
+    await runIntake({ llmClient, systemPrompt: "system", description: "a task tracker", history });
+
+    expect(llmClient.chat).toHaveBeenCalledWith({
+      messages: [
+        { role: "system", content: "system" },
+        ...history,
+        { role: "user", content: "a task tracker" },
+      ],
+      maxTokens: 8192,
+    });
+  });
+
+  it("works with no history at all (standalone CLI usage, unaffected)", async () => {
+    const llmClient = llmClientReturning({
+      message: { role: "assistant", content: "## Resource\nTask\n" },
+      finishReason: "stop",
+    });
+
+    await runIntake({ llmClient, systemPrompt: "system", description: "a task tracker" });
+
+    expect(llmClient.chat).toHaveBeenCalledWith({
+      messages: [
+        { role: "system", content: "system" },
+        { role: "user", content: "a task tracker" },
+      ],
+      maxTokens: 8192,
+    });
+  });
+
   it("recognizes a QUESTION: response and strips the marker", async () => {
     const llmClient = llmClientReturning({
       message: { role: "assistant", content: "QUESTION:\nWhat should the resource be called?" },

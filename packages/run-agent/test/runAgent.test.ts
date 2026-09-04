@@ -41,7 +41,12 @@ describe("createRunAgent().start", () => {
     expect(calls[2]).toEqual([
       "/workspace",
       ["up", "-d", "rails", "frontend"],
-      { RAILS_HOST_PORT: "40000", FRONTEND_HOST_PORT: "40001" },
+      {
+        RAILS_HOST_PORT: "40000",
+        RAILS_URL: "http://localhost:40000",
+        FRONTEND_HOST_PORT: "40001",
+        FRONTEND_URL: "http://localhost:40001",
+      },
     ]);
   });
 
@@ -64,6 +69,21 @@ describe("createRunAgent().start", () => {
     // No "rails" component present — migration step must be skipped entirely.
     const commands = (deps.runDockerCompose as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1][0]);
     expect(commands).not.toContain("run");
+  });
+
+  it("provides every component's URL to every component, not just its own port", async () => {
+    const deps = makeDeps();
+    const agent = createRunAgent(deps);
+
+    await agent.start({ workspacePath: "/workspace" });
+
+    const upComponentsCall = (deps.runDockerCompose as ReturnType<typeof vi.fn>).mock.calls[2];
+    const env = upComponentsCall[2] as Record<string, string>;
+    // "frontend" needs RAILS_URL to reach the backend; "rails" needs
+    // FRONTEND_URL for CORS — both must be present regardless of which
+    // service actually owns that port. See docs/designs/component-networking.md.
+    expect(env.RAILS_URL).toBe("http://localhost:40000");
+    expect(env.FRONTEND_URL).toBe("http://localhost:40001");
   });
 
   it("fails without touching docker if docker-compose.yml can't be read", async () => {

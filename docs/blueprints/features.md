@@ -30,7 +30,9 @@ Create or select a project and track its stage through a fixed pipeline:
 `ideation → product_requirements → ux → design → development → production`.
 
 - API: `GET/POST /api/projects`, `PATCH /api/projects/:id/stage` — [`projectStore.ts`](../../packages/orchestrator/src/projectStore.ts), [`app.ts`](../../packages/orchestrator/src/app.ts)
-- UI: project dropdown, "+ New project" inline form, stage selector — [`App.tsx`](../../packages/web/src/App.tsx)
+- UI: project dropdown, "+ New project" inline form, stage selector, and
+  the selected project's workspace directory (truncated, full path on
+  hover) — [`App.tsx`](../../packages/web/src/App.tsx)
 - Stage changes are manual today — nothing yet infers or advances a stage automatically.
 - The last-selected project is remembered across a page reload
   (`localStorage`, browser-scoped) — reloading reselects it instead of
@@ -137,19 +139,39 @@ including the agent self-correcting a namespace mismatch, a serializer
 quirk, and a typo along the way.
 
 - The assistant acknowledges immediately, then posts further messages as
-  the build progresses (the Codegen Agent's own narration — not a
-  synthetic progress bar) and a final pass/fail result — the web UI polls
-  for these while a build is in flight, so it doesn't look stuck even
-  though there's no real streaming yet.
+  the build progresses — the Codegen Agent's own narration plus a
+  one-line summary of every tool call it makes (`"→ write_file:
+  app/models/task.rb"`, `"→ run_command: bundle exec rspec"`, etc., never
+  the tool's actual output) — and a final pass/fail result. The web UI
+  polls for these while a build is in flight, so it doesn't look stuck
+  even during a long stretch where the model isn't narrating in plain
+  text (bug #14) or while there's no real streaming yet.
 - If the description is ambiguous, the reply is the Intake Agent's
   clarifying question — send another `/build` with more detail.
 - Only one build runs per project at a time — a second `/build` while one
   is in flight gets a "please wait," not a conflicting run.
+- **`/build` also works against a project you've already built**
+  (feature #18): the orchestrator checks that project's own
+  `docs/blueprints/features.md` — still the scaffold's stub text means
+  fresh (today's behavior above); anything else means Intake is shown
+  what already exists and describes your request as a delta ("add a
+  reminders screen"), and Codegen is told not to break, rename, or
+  duplicate what's already there. This applies regardless of whether the
+  *previous* build's tests fully passed — a follow-up after a failed
+  attempt still builds on whatever was genuinely there, not a rewrite.
+- **Every `/build` — fresh or incremental, passing or not — leaves a
+  real record** in the project's own `docs/`: a `docs/designs/<slug>.md`
+  with the plan and an honest outcome (what passed, what didn't, what's
+  left), a `docs/backlog.md` row, an updated `docs/blueprints/features.md`,
+  and a `CHANGELOG.md` entry — the project follows its own mandatory
+  Feature workflow for real (bug #16), the same discipline the Debug
+  Agent already applies to bugs.
 - **Known limitations**: no accounts, no real SSE/WebSocket streaming
   (HTTP polling stands in for this milestone), no delivery (git push/
   zip), and no durable job queue — an orchestrator restart mid-build
   loses that result.
-- Design record: [`wire-agents-into-chat.md`](../designs/wire-agents-into-chat.md)
+- Design record: [`wire-agents-into-chat.md`](../designs/wire-agents-into-chat.md),
+  [`intake-iteration.md`](../designs/intake-iteration.md)
 
 ## Per-agent token usage reporting
 
@@ -195,6 +217,13 @@ manual control any time after that:
   one after the other: once the app is fully written, its final test
   suite and the Run Agent's startup both begin immediately, so a live
   preview doesn't wait on every test being confirmed passing first.
+- Every component the Run Agent brings up gets its own full URL passed
+  to every *other* component too (`<NAME>_URL`, not just its own port) —
+  so a generated app's components can always correctly reach each other
+  regardless of which ports got allocated that run, and a generated
+  backend now ships with real, working CORS out of the box (feature
+  #17, superseding bugs #12/#13). Convention:
+  [`component-networking.md`](../../stack-spec/guidelines/component-networking.md).
 - Design record: [`run-deploy-agent.md`](../designs/run-deploy-agent.md)
 
 ## Investigating and fixing issues — `/debug`
@@ -223,6 +252,10 @@ before reporting back:
   covers both sides' full test suites, not just what was touched.
 - Guarded the same way `/build`/`/proceed` are — one code-mutating
   operation per project at a time.
+- Interim chat progress includes a one-line summary of every tool call
+  the agent makes, not just its plain-text narration, so the log stays
+  visibly alive through a long stretch of pure fix-and-verify iterations
+  (bug #14).
 - Verified live 2026-09-03: a real backend bug (a dropped field in a
   controller's permitted params) was found, fixed, and logged correctly
   by a real LLM run — see design doc.

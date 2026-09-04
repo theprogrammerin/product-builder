@@ -16,6 +16,18 @@ own UI.
 - [`vite.config.ts`](../../../packages/web/vite.config.ts) — dev-server
   proxy of `/api` to the orchestrator at `http://localhost:4000`
 
+## Chat rendering
+
+A message matching `TOOL_CALL_LINE_PATTERN` (`"[build] → ..."`/`"[debug] →
+..."` — the shape `formatToolCall()` on the orchestrator side produces,
+see bug #14) renders as a small, compact metadata line (`.chat-tool-call`
+— monospace, no bubble background/padding, tag prefix stripped) in its
+natural chronological position in the log, instead of a full chat bubble.
+Everything else (the model's own narration, terminal results) still
+renders as a normal `.chat-message` bubble. Fixed as bug #16 — these were
+originally full-size bubbles, which felt too heavy for what's really just
+a running activity log.
+
 ## State
 
 - Plain React `useState` — no state-management library. One page, kept

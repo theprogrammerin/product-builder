@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { PathEscapeError, createFileTools, resolveScoped } from "../src/tools.js";
+import { PathEscapeError, createFileTools, createProjectDocsTools, isProjectDocPath, resolveScoped } from "../src/tools.js";
 
 let root: string;
 
@@ -102,5 +102,45 @@ describe("createFileTools", () => {
     await tools.writeFile("app/models/task.rb", "class Task; end\n");
 
     expect(await tools.searchFiles("NoSuchThing")).toEqual([]);
+  });
+});
+
+describe("isProjectDocPath", () => {
+  it("allows the fixed governance doc paths", () => {
+    expect(isProjectDocPath("docs/blueprints/features.md")).toBe(true);
+    expect(isProjectDocPath("docs/blueprints/architecture.md")).toBe(true);
+    expect(isProjectDocPath("docs/backlog.md")).toBe(true);
+    expect(isProjectDocPath("CHANGELOG.md")).toBe(true);
+  });
+
+  it("allows any docs/designs/<slug>.md", () => {
+    expect(isProjectDocPath("docs/designs/add-reminders.md")).toBe(true);
+    expect(isProjectDocPath("docs/designs/task-tracker-v2.md")).toBe(true);
+  });
+
+  it("rejects anything outside the allowlist — not a general project-root sandbox", () => {
+    expect(isProjectDocPath("backend/app/models/task.rb")).toBe(false);
+    expect(isProjectDocPath("docs/designs/../../etc/passwd.md")).toBe(false);
+    expect(isProjectDocPath("docs/designs/Has Spaces.md")).toBe(false);
+    expect(isProjectDocPath("CLAUDE.md")).toBe(false);
+  });
+});
+
+describe("createProjectDocsTools", () => {
+  it("writes and reads back a design doc, creating docs/designs/ if needed", async () => {
+    const tools = createProjectDocsTools(root);
+    await tools.write("docs/designs/add-reminders.md", "# Design: Add reminders\n");
+    expect(await tools.read("docs/designs/add-reminders.md")).toBe("# Design: Add reminders\n");
+  });
+
+  it("reading a doc that doesn't exist yet returns a friendly placeholder, not a thrown error", async () => {
+    const tools = createProjectDocsTools(root);
+    expect(await tools.read("docs/designs/not-written-yet.md")).toBe("(does not exist yet)");
+  });
+
+  it("rejects a path outside the allowlist for both read and write", async () => {
+    const tools = createProjectDocsTools(root);
+    await expect(tools.read("backend/app/models/task.rb")).rejects.toThrow("Not a project doc path");
+    await expect(tools.write("backend/app/models/task.rb", "x")).rejects.toThrow("Not a project doc path");
   });
 });

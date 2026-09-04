@@ -23,6 +23,10 @@ built from them verbatim (see
   - [`frontend-architecture.md`](../../../stack-spec/guidelines/frontend-architecture.md) — navigation/state/component-library picks
   - [`error-handling.md`](../../../stack-spec/guidelines/error-handling.md) — exception → status/code mapping
   - [`testing.md`](../../../stack-spec/guidelines/testing.md) — what "done" means for a generation run
+  - [`component-networking.md`](../../../stack-spec/guidelines/component-networking.md) —
+    every component can run on its own origin; cross-component URLs come
+    from environment variables (`<NAME>_URL`, provided by the Run Agent),
+    never hardcoded; CORS is required, not optional (feature #17)
 - [`template/`](../../../stack-spec/template) — copied verbatim into every
   new project by `scaffoldProject()`:
   - `backend/` — a **real** `rails new --api` + `rails generate

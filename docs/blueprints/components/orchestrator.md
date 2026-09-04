@@ -89,6 +89,57 @@ same project while one is in flight with a "please wait" reply. See
 [wire-agents-into-chat.md](../../designs/wire-agents-into-chat.md) and
 [frontend-generation.md](../../designs/frontend-generation.md).
 
+### `/build` against an already-built project (feature #18)
+
+`/build`'s handler reads the target project's own
+`docs/blueprints/features.md` before calling Intake
+(`readExistingProjectContext()`) — still the scaffold's stub text means
+fresh (`existingContext: undefined`, today's behavior above); anything
+else means incremental (`architecture.md`/`backlog.md` are read too and
+handed to Intake, which switches to `buildIncrementalSystemPrompt()`).
+This is reality-based, not a stored pass/fail flag, specifically so a
+follow-up after a failed build still builds on whatever was genuinely
+attempted. `pendingSpecs` (keyed by `projectId`) now holds
+`{ spec, featureSlug, isIncremental }`, not a bare string — `featureSlug`
+is derived from a `# <Feature Title>` line Intake is instructed to lead
+its reply with (`deriveFeatureSlug()`/`slugify()`), and both fields flow
+through `/proceed` into `defaultRunCodegenPhase`.
+
+Every build — fresh or incremental, passing or not — now also leaves a
+real record via two new tools (`read_project_doc`/`write_project_doc`,
+scoped to a fixed allowlist: `features.md`, `architecture.md`,
+`backlog.md`, `CHANGELOG.md`, `docs/designs/<slug>.md`) that
+`defaultRunCodegenPhase` supplies to both the backend and frontend
+Codegen phases, alongside a mandatory "before you finish" instruction in
+their system prompts (bug #16). Since that instruction only fires when
+the model reaches a *natural* stop, `runFeatureWorkflowEpilogue()` is a
+safety net: whenever the final authoritative test run doesn't pass
+(model never converged, or converged but was simply wrong), a bounded
+follow-up `runCodegenLoop` call — restricted to *only* the project-doc
+tools, told not to touch application code — writes the real outcome
+instead of leaving no record at all. See
+[intake-iteration.md](../../designs/intake-iteration.md).
+
+### `/build` also sees prior chat, not just its own description (bug #17)
+
+Before calling Intake, `/build`'s handler fetches `chatStore.get(projectId)`
+and passes it through `filterHistoryForIntake()`, which drops only the
+noisy interim tags (`[build]`/`[debug]` narration, the `"[run] Starting
+your app..."` pending line — `isNoisyProgressMessage()`) and keeps
+everything else: every terminal outcome tag (`[build:done]`,
+`[build:failed]`, `[build:question]`, `[build:review]`, `[run:live]`,
+`[run:failed]`, `[debug:done]`, `[debug:failed]`, `[stop:done]`), all
+user messages (including past `/build`/`/proceed`/`/debug` commands
+verbatim), and plain untagged assistant chat. `RunIntakePhase.history`
+carries this through to `runIntake`, which inserts it between the system
+prompt and the current description — the same message shape ordinary
+chat already uses. The Codegen Agent deliberately does **not** also
+receive raw chat — it continues to rely on Intake's distilled spec, per
+the existing separation of concerns (Intake: language comprehension;
+Codegen: spec execution). Live-verified: a preference stated in a plain
+chat message before `/build` (a field-naming convention) showed up
+correctly in Intake's proposed plan.
+
 ### `/run` and `/stop`: the Run Agent
 
 Once the frontend's code-writing loop converges (backend already
@@ -129,6 +180,30 @@ cadence as chat messages. See
 [token-usage-reporting.md](../../designs/token-usage-reporting.md)'s
 Amendment section.
 
+### Agent-event → chat progress relay
+
+`defaultRunCodegenPhase` and `defaultRunDebugPhase` each build a
+`forward(event: AgentEvent)` closure passed as `onEvent` into
+`runCodegenAgent`/`runCodegenLoop`/`runDebugAgent`. It turns three kinds
+of event into an `onProgress(...)` chat line:
+
+- `assistant_message` with non-null `content` — the model's own
+  narration, posted as-is.
+- `tool_call` — a one-line summary via `formatToolCall()` (e.g. `"→
+  write_file: app/models/note.rb"`), never the tool's result. Without
+  this, the chat log goes quiet for however long the model keeps calling
+  tools without narrating in plain text — bug #14.
+- `empty_turn` — a turn with neither text nor a tool call — via
+  `formatEmptyTurn()`, naming the real `finishReason` (`"ran out of
+  token budget"` when it's `"length"`) — bug #15. The real fix for *why*
+  these happen is [codegen-agent](./codegen-agent.md)'s `maxTokens`
+  ceiling (raised to 8192, matching Intake's); this is the fallback for
+  whenever one still slips through.
+
+Both `"→ "`-prefixed kinds render as compact metadata in the web UI, not
+full chat bubbles — see [web blueprint](./web.md)'s Chat rendering
+section (bug #16).
+
 ## Known limitations
 
 - Projects and chat history persist in Postgres, but scaffolded files on
@@ -157,15 +232,22 @@ Amendment section.
   project CRUD (including scaffold failure → 500, nothing stored), stage
   updates, chat history, `/build` (ack + interim + terminal messages, the
   concurrency guard, empty-description rejection, ordinary chat
-  unaffected), `defaultRunIntakePhase`'s usage reporting directly, and
+  unaffected), `defaultRunIntakePhase`'s usage reporting directly,
   `GET /api/projects/:id/progress` (null/404, cumulative accumulation
   across calls, a real non-null `callStartedAt` while a fake call is
-  in-flight, reset-to-zero on a new phase). Runs with no Postgres or
-  Docker required — the real `defaultRunBuild`/`defaultRunCodegenPhase`/
-  `defaultRunDebugPhase` flow (and the live token-usage footer) was
-  verified manually through the actual browser UI and direct API calls,
-  not in this suite; see the design record's Outcome/Verification
-  sections.
+  in-flight, reset-to-zero on a new phase), `readExistingProjectContext`/
+  `slugify`/`deriveFeatureSlug` against real temp directories,
+  `isNoisyProgressMessage`/`filterHistoryForIntake` (interim tags
+  dropped, every terminal tag and all plain conversation kept), and
+  route-level tests confirming `existingContext`/`isIncremental`/
+  `featureSlug`/filtered `history` are threaded correctly from `/build`
+  through to Intake and on to `/proceed`. Runs with no Postgres or
+  Docker required — the real
+  `defaultRunBuild`/`defaultRunCodegenPhase`/`defaultRunDebugPhase` flow
+  (the live token-usage footer, and feature #18's incremental-mode +
+  epilogue behavior) was verified manually through the actual browser UI
+  and direct API calls, not in this suite; see the relevant design
+  records' Outcome/Verification sections.
 - [`test/scaffold.test.ts`](../../../packages/orchestrator/test/scaffold.test.ts) —
   exercises the real `fs.cp` copy against temp directories: copies the
   tree, creates `PROJECT_FILES_DIR` if missing, throws instead of

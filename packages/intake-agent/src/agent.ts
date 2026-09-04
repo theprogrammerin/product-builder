@@ -1,4 +1,4 @@
-import type { LLMClient } from "@app-builder/llm-client";
+import type { ChatMessage, LLMClient } from "@app-builder/llm-client";
 
 export type IntakeResult =
   | { kind: "spec"; content: string }
@@ -9,6 +9,15 @@ export interface RunIntakeOptions {
   systemPrompt: string;
   description: string;
   maxTokens?: number;
+  /**
+   * Prior conversation for this project, so a `/build` can reflect
+   * something said in an earlier plain-chat turn instead of only the
+   * exact text after `/build`. The caller (the orchestrator) is
+   * responsible for filtering out noisy tagged progress messages first
+   * — see docs/backlog.md bug #17. Omitted entirely by the standalone
+   * CLI, which has no chat history to offer.
+   */
+  history?: ChatMessage[];
 }
 
 export class EmptyIntakeResponseError extends Error {
@@ -44,11 +53,12 @@ const DEFAULT_MAX_TOKENS = 8192;
  * not a systematic problem with a given description. See bug #2.
  */
 export async function runIntake(options: RunIntakeOptions): Promise<IntakeResult> {
-  const { llmClient, systemPrompt, description, maxTokens = DEFAULT_MAX_TOKENS } = options;
+  const { llmClient, systemPrompt, description, maxTokens = DEFAULT_MAX_TOKENS, history = [] } = options;
 
-  const messages = [
-    { role: "system" as const, content: systemPrompt },
-    { role: "user" as const, content: description },
+  const messages: ChatMessage[] = [
+    { role: "system", content: systemPrompt },
+    ...history,
+    { role: "user", content: description },
   ];
 
   let content: string | null = null;

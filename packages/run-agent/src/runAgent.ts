@@ -98,9 +98,16 @@ export function createRunAgent(deps: Partial<RunAgentDeps> = {}): RunAgent {
         if (migrate.exitCode !== 0) return failed(describeCommandFailure("Database migration", migrate));
       }
 
+      // Every component's URL is made available to every other one —
+      // not just its own port — so any service's environment: block can
+      // reference `${<NAME>_URL}` for whichever other component it needs
+      // to reach, regardless of which of those services it itself is.
+      // See docs/designs/component-networking.md.
       const componentEnv: Record<string, string> = {};
       for (const component of components) {
-        componentEnv[component.envVar] = String(ports.get(component.name));
+        const port = ports.get(component.name)!;
+        componentEnv[component.envVar] = String(port);
+        componentEnv[`${component.name.toUpperCase()}_URL`] = `http://localhost:${port}`;
       }
 
       const upComponents = await d.runDockerCompose(

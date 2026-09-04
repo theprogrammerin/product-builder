@@ -20,7 +20,12 @@
 # passed, so those calls are unaffected either way. Only `docker compose
 # up -d` (the Run Agent — see docs/designs/run-deploy-agent.md) sets
 # these per invocation, picking a free host port itself, so concurrently
-# running projects still don't collide the way a fixed port would.
+# running projects still don't collide the way a fixed port would. The
+# Run Agent also sets a `${<NAME>_URL}` (e.g. RAILS_URL, FRONTEND_URL)
+# per component at the same time — see
+# stack-spec/guidelines/component-networking.md — so any service can
+# reference any other one's real, allocated URL, never a hardcoded
+# localhost:<port>.
 services:
   rails:
     build: ./backend
@@ -39,6 +44,12 @@ services:
     environment:
       MYSQL_HOST: mysql
       MONGO_URI: mongodb://mongo:27017/app_development
+      # The frontend always runs on a different, dynamically-allocated
+      # origin than this backend — CORS is required (see
+      # config/initializers/cors.rb and
+      # stack-spec/guidelines/component-networking.md). FRONTEND_URL is
+      # provided by the Run Agent the same way RAILS_URL is below.
+      FRONTEND_ORIGIN: "${FRONTEND_URL}"
 
   sidekiq:
     build: ./backend
@@ -98,6 +109,14 @@ services:
       # honors unconditionally. See docs/designs/frontend-generation.md.
       CI: "true"
       FORCE_COLOR: "0"
+      # The Run Agent picks a fresh, unpredictable host port for `rails`
+      # on every run — RAILS_URL is that run's actual full backend URL,
+      # provided by the Run Agent the same way RAILS_HOST_PORT is above.
+      # Without this, the frontend's API client falls back to its
+      # hardcoded default (localhost:3000), which is only right by
+      # coincidence. See stack-spec/guidelines/component-networking.md
+      # and docs/backlog.md bug #12/feature #17.
+      EXPO_PUBLIC_API_BASE_URL: "${RAILS_URL}/api/v1"
 
 volumes:
   bundle_cache:

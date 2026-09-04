@@ -306,6 +306,85 @@ describe("runCodegenLoop", () => {
     expect(userNudges).toHaveLength(2);
   });
 
+  it("fires an empty_turn event with the real finishReason instead of leaving the caller with total silence", async () => {
+    const fileTools = fakeFileTools();
+    const dockerRunner = fakeDockerRunner();
+    const llmClient = llmClientReturning(
+      { message: { role: "assistant", content: null }, finishReason: "length" },
+      { message: { role: "assistant", content: "Actually done now." }, finishReason: "stop" },
+    );
+    const onEvent = vi.fn();
+
+    await runCodegenLoop({ llmClient, systemPrompt: "system", buildSpec, fileTools, dockerRunner, onEvent });
+
+    expect(onEvent).toHaveBeenCalledWith({ type: "empty_turn", finishReason: "length" });
+  });
+
+  it("does not expose read_project_doc/write_project_doc when projectDocsTools isn't supplied", async () => {
+    const fileTools = fakeFileTools();
+    const dockerRunner = fakeDockerRunner();
+    const llmClient = llmClientReturning({ message: { role: "assistant", content: "done" }, finishReason: "stop" });
+
+    await runCodegenLoop({ llmClient, systemPrompt: "system", buildSpec, fileTools, dockerRunner });
+
+    const toolNames = llmClient.chat.mock.calls[0][0].tools.map((t: { function: { name: string } }) => t.function.name);
+    expect(toolNames).not.toContain("read_project_doc");
+    expect(toolNames).not.toContain("write_project_doc");
+  });
+
+  it("appends read_project_doc/write_project_doc to the tool schema when projectDocsTools is supplied, and dispatches to it", async () => {
+    const fileTools = fakeFileTools();
+    const dockerRunner = fakeDockerRunner();
+    const projectDocsTools = { read: vi.fn(async () => "existing content"), write: vi.fn(async () => undefined) };
+    const llmClient = llmClientReturning(
+      {
+        message: {
+          role: "assistant",
+          content: null,
+          toolCalls: [
+            {
+              id: "1",
+              type: "function",
+              function: { name: "write_project_doc", arguments: JSON.stringify({ path: "docs/backlog.md", content: "row" }) },
+            },
+          ],
+        },
+        finishReason: "tool_calls",
+      },
+      { message: { role: "assistant", content: "done" }, finishReason: "stop" },
+    );
+
+    await runCodegenLoop({ llmClient, systemPrompt: "system", buildSpec, fileTools, dockerRunner, projectDocsTools });
+
+    const toolNames = llmClient.chat.mock.calls[0][0].tools.map((t: { function: { name: string } }) => t.function.name);
+    expect(toolNames).toEqual(
+      expect.arrayContaining(["read_file", "write_file", "read_project_doc", "write_project_doc"]),
+    );
+    expect(projectDocsTools.write).toHaveBeenCalledWith("docs/backlog.md", "row");
+  });
+
+  it("an explicit toolDefinitions override still wins even when projectDocsTools is also supplied", async () => {
+    const fileTools = fakeFileTools();
+    const dockerRunner = fakeDockerRunner();
+    const projectDocsTools = { read: vi.fn(), write: vi.fn() };
+    const customTools = [
+      { type: "function" as const, function: { name: "only_this_tool", description: "d", parameters: {} } },
+    ];
+    const llmClient = llmClientReturning({ message: { role: "assistant", content: "done" }, finishReason: "stop" });
+
+    await runCodegenLoop({
+      llmClient,
+      systemPrompt: "system",
+      buildSpec,
+      fileTools,
+      dockerRunner,
+      projectDocsTools,
+      toolDefinitions: customTools,
+    });
+
+    expect(llmClient.chat.mock.calls[0][0].tools).toEqual(customTools);
+  });
+
   it("passes a generous maxTokens on every call to avoid truncated/empty responses", async () => {
     const fileTools = fakeFileTools();
     const dockerRunner = fakeDockerRunner();

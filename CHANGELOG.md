@@ -7,6 +7,146 @@ together.
 
 ## Unreleased
 
+### Fix: `/build` couldn't see anything said in prior plain chat (bug #17)
+
+Intake was only ever handed the exact text after `/build` — ordinary
+chat correctly includes full history, but `/build` didn't, and the
+Codegen Agent then only ever saw Intake's distilled spec, never raw
+chat. Fixed by threading a filtered `history` into `runIntake`, inserted
+between the system prompt and the current description (the same shape
+ordinary chat already uses). Filtering keeps the signal real: only
+`[build]`/`[debug]` interim narration and the `"[run] Starting your
+app..."` pending line are dropped — every terminal outcome tag
+(`[build:done]`, `[build:failed]`, `[build:question]`, `[build:review]`,
+`[run:live]`, `[run:failed]`, `[debug:done]`, `[debug:failed]`,
+`[stop:done]`) is kept, since "what happened last time" is genuinely
+useful, especially after a failure. The Codegen Agent is deliberately
+unchanged — it still relies on Intake's distilled spec, not raw chat.
+Live-verified: a field-naming preference stated in plain chat before
+`/build` showed up correctly in Intake's proposed plan. 199 tests pass
+across all six packages.
+
+### Show the project's workspace directory in the UI (feature request #19)
+
+The project bar now shows the selected project's `workspacePath` next to
+the project/stage dropdowns — truncated (ellipsis on the left, keeping
+the project id visible), full path on hover. Pure client-side change:
+the server already returned `workspacePath` on every project.
+
+### `/build` against an already-built project + real generated-project governance (feature request #18, folds in bug #16)
+
+`/build` now works two ways: against a fresh project, unchanged from
+before; against a project that's already been built at least once
+(detected by reading that project's own `docs/blueprints/features.md` —
+still the scaffold's stub means fresh, anything else means incremental,
+*regardless* of whether the last build's tests actually passed), Intake
+is shown what already exists and describes the request as a delta, and
+Codegen is told explicitly not to break, rename, or duplicate existing
+work. Folds in a real prerequisite gap (bug #16): every scaffolded
+project's `docs/blueprints/features.md`/`CLAUDE.md` already claimed a
+Feature workflow, but the Codegen Agent never once followed it — a
+completed `/build` never touched `features.md`, `docs/backlog.md`, or
+`CHANGELOG.md`. Fixed with two new tools (`read_project_doc`/
+`write_project_doc`, a fixed allowlist, not a general project-root
+sandbox) and a mandatory final step in both Codegen system prompts.
+
+Found live, not anticipated up front: that mandatory step only runs when
+the model reaches a natural stop — a model that instead burns its whole
+iteration budget still fighting failures never reaches it, leaving no
+record at all of the very builds where a record matters most. Fixed with
+`runFeatureWorkflowEpilogue`: whenever the final authoritative test run
+doesn't pass, a bounded follow-up pass — restricted to only the two
+project-doc tools, told not to touch application code — writes the real
+outcome (status, what passed, what didn't, what's left) into a real
+`docs/designs/<slug>.md`. Live-verified end-to-end against a real
+generated project, including this exact epilogue path producing a
+genuinely good design doc after a real backend failure. 191 tests pass
+across all six packages. Design record:
+[`intake-iteration.md`](docs/designs/intake-iteration.md).
+
+### Component networking guideline: no more hardcoded cross-component URLs (feature request #17, supersedes bug #13)
+
+Bugs #12 and #13 were both instances of the same gap: generated code
+assuming a fixed, shared origin between components, which the Run
+Agent's dynamic port allocation makes false on every run. Fixed at the
+source instead of patching each occurrence: a new
+[`stack-spec/guidelines/component-networking.md`](stack-spec/guidelines/component-networking.md)
+instructs the Codegen/Debug Agent to always read a cross-component URL
+from an environment variable, never hardcode one, and to always
+configure CORS properly. The Run Agent now provides a `<NAME>_URL` (a
+component's full reachable URL) for every component to every *other*
+component too, not just its own `<NAME>_HOST_PORT`. The template's
+`docker-compose.yml`/`Gemfile`/`cors.rb` were retrofitted to actually
+follow the convention (same precedent as bug #7's `puma` fix — bake it
+into the scaffold, don't rely on the model remembering). Live-verified
+end-to-end on `test_feature14_a`: a `/stop`+`/run` cycle picked up the
+new config, and the app loaded real data in the browser with no CORS or
+connection error. (That project's own CORS fix — independently completed
+by its in-app Debug Agent with a deliberately-reasoned wildcard-origin
+approach — was left as-is rather than overwritten; only its
+`docker-compose.yml` was aligned to the new convention.)
+
+### Fix: empty LLM turns causing `/build`/`/debug` to look stuck again (bug #15)
+
+Even after bug #14, a run could still look stuck: `runCodegenLoop`'s
+"empty turn" case (a model turn with neither text nor a tool call) only
+fired an event with `content: null`, which `forward()` correctly had
+nothing to relay for — the loop silently nudged and retried, spending
+real tokens with zero visible signal. Root-caused, not just papered
+over: `codegen-agent`'s completion budget (`maxTokens: 4096`) was half of
+`intake-agent`'s (`8192`), despite both going through the same model,
+and Intake's ceiling was already raised once for exactly this failure
+mode (bug #2 — hidden reasoning can quietly eat the whole budget before
+any visible output). Raised to 8192 to match, since a codegen/debug turn
+is typically *more* demanding per turn (a `write_file` call carries a
+full file's content, competing with reasoning for the same budget) — and
+`debug-agent` gets this for free, since it reuses the same loop. Kept a
+visibility fallback for whenever a turn still comes back empty despite
+the higher ceiling: a new `empty_turn` `AgentEvent` carries the real
+`finishReason`, surfaced as `"→ empty turn — ran out of token budget..."`
+when it's `"length"`, or naming the actual reason otherwise.
+
+### Tool-call lines render as compact metadata, not chat bubbles (feature request #16, amends bug #14)
+
+Bug #14's tool-call summary lines (`"→ write_file: ..."`, etc.) were full
+chat bubbles — too heavy for what's really a running activity log. They
+now render as small, monospace metadata lines at the same position in
+the chat log (tag prefix stripped), while real narration and results
+stay as normal bubbles. Pure client-side change (`App.tsx`/`index.css`),
+no server changes.
+
+### Fix: `/build`/`/debug` chat log going quiet mid-run (bug #14)
+
+`forward()` (the bridge from agent events to chat messages) only ever
+relayed a model turn's plain-text content — a `tool_call` event (the
+actual file writes, commands, etc.) was silently dropped. Since models
+commonly stop narrating in plain text once deep into a repetitive
+fix-and-verify loop, the chat log would go quiet for long stretches even
+though real work (and real token spend, visible in the footer) was still
+happening — indistinguishable from a stuck run. Fixed with a shared
+`formatToolCall()` helper posting a one-line summary per tool call (e.g.
+`"→ write_file: app/models/note.rb"`, `"→ run_command: bundle exec
+rspec"`), wired into both `defaultRunCodegenPhase` and
+`defaultRunDebugPhase`. Tool *results* are still never posted to chat.
+Live-verified against a real `/proceed` run.
+
+### Fix: live frontend always tried port 3000 for the backend (bug #12)
+
+The Run Agent allocates a fresh, unpredictable host port for `rails` on
+every run, but nothing told the frontend container what it actually was —
+its API client fell back to a hardcoded `localhost:3000` default, which
+only worked by coincidence. Fixed by interpolating
+`EXPO_PUBLIC_API_BASE_URL` from the same `RAILS_HOST_PORT` env var the
+Run Agent already passes for the `ports:` mapping, in both the master
+template and the affected project's own `docker-compose.yml`.
+Live-verified: the served bundle now embeds the real allocated port, and
+a real browser request correctly targeted it. Found in the same pass: a
+separate, pre-existing CORS gap (bug #13, deferred) still blocks any
+generated app's frontend from actually completing a request to its
+backend, regardless of port — `config/initializers/cors.rb` is the
+default, fully-commented-out Rails stub and `rack-cors` was never added
+to the `Gemfile`.
+
 ### Remember the last-selected project across a reload (feature request #15)
 
 The web chat UI always defaulted to the first project in the list on

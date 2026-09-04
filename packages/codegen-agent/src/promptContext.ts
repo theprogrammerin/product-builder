@@ -43,11 +43,53 @@ async function loadStackSpecContext(
 }
 
 /**
+ * Only included when the caller (the orchestrator's /build flow) also
+ * supplies matching read_project_doc/write_project_doc tools — the
+ * standalone CLI doesn't wire those up, so it omits this param entirely
+ * and the model is never told about tools it doesn't actually have. See
+ * docs/designs/intake-iteration.md.
+ */
+export interface FeatureWorkflowContext {
+  /** kebab-case, used as docs/designs/<featureSlug>.md */
+  featureSlug: string;
+  /** true if this project already had real content before this run (see bug #16). */
+  isIncremental: boolean;
+}
+
+export function buildFeatureWorkflowInstructions({ featureSlug, isIncremental }: FeatureWorkflowContext): string {
+  return (
+    "Before you finish — whether every step above fully succeeded or " +
+    "not — follow this project's own Feature workflow (see its " +
+    "CLAUDE.md), using real tool calls, not narration:\n" +
+    `1. read_project_doc("docs/designs/${featureSlug}.md") — if it ` +
+    "already exists (an earlier attempt at this same feature, or the " +
+    "other phase's own earlier write in this same run), continue it " +
+    "rather than starting over.\n" +
+    `2. write_project_doc("docs/designs/${featureSlug}.md", ...) with ` +
+    "Summary, Feature-set impact, Architecture impact, Design, and an " +
+    "honest Outcome section — what you attempted, what's actually " +
+    "passing, what isn't, and (if you didn't finish) exactly what's left.\n" +
+    '3. read_project_doc("docs/backlog.md"), add or update this ' +
+    "feature's row (status `done` only if your final test run " +
+    "genuinely passed; `building` otherwise), linking the design doc above.\n" +
+    '4. read_project_doc("docs/blueprints/features.md"), update it to ' +
+    "describe the app's current, real capabilities — not aspirational " +
+    "ones." +
+    (isIncremental
+      ? " This describes the WHOLE app, not just your new piece — keep " +
+        "what's already accurate below and add your part."
+      : "") +
+    '\n5. write_project_doc("CHANGELOG.md", ...) with a new entry, prepended.'
+  );
+}
+
+/**
  * Builds the Codegen Agent's backend (Rails) system prompt. This is the
  * first code that reads stack-spec/ programmatically.
  */
 export async function buildSystemPrompt(
   stackSpecDir: string = DEFAULT_STACK_SPEC_DIR,
+  featureWorkflow?: FeatureWorkflowContext,
 ): Promise<string> {
   const { versions, guidelineSections } = await loadStackSpecContext(stackSpecDir);
 
@@ -85,8 +127,19 @@ export async function buildSystemPrompt(
       "exploring before you start writing and running real code.",
     `Locked stack versions:\n\n${versions}`,
     `Guidelines you must follow:\n\n${guidelineSections.join("\n\n")}`,
-    "Only respond with plain text and no tool calls once every step above " +
-      "is genuinely complete. A final `bundle exec rspec` run will then " +
+    ...(featureWorkflow?.isIncremental
+      ? [
+          "IMPORTANT — this app already has real backend code in it. You " +
+            "are NOT building from scratch: do not rename, delete, or " +
+            "restructure an existing model/migration/controller unless " +
+            "the build spec explicitly asks you to change it. A new " +
+            "migration must not conflict with an existing table.",
+        ]
+      : []),
+    ...(featureWorkflow ? [buildFeatureWorkflowInstructions(featureWorkflow)] : []),
+    "Only respond with plain text and no tool calls once every step " +
+      (featureWorkflow ? "above (code AND docs)" : "above") +
+      " is genuinely complete. A final `bundle exec rspec` run will then " +
       "verify your work regardless of what you claim — an empty or " +
       "premature 'done' will be caught and reported as a failed run.",
   ].join("\n\n");
@@ -99,6 +152,7 @@ export async function buildSystemPrompt(
  */
 export async function buildFrontendSystemPrompt(
   stackSpecDir: string = DEFAULT_STACK_SPEC_DIR,
+  featureWorkflow?: FeatureWorkflowContext,
 ): Promise<string> {
   const { versions, guidelineSections } = await loadStackSpecContext(stackSpecDir);
 
@@ -154,8 +208,20 @@ export async function buildFrontendSystemPrompt(
       "exploring before you start writing and running real code.",
     `Locked stack versions:\n\n${versions}`,
     `Guidelines you must follow:\n\n${guidelineSections.join("\n\n")}`,
-    "Only respond with plain text and no tool calls once every step above " +
-      "is genuinely complete. A final `npx jest` run will then verify " +
+    ...(featureWorkflow?.isIncremental
+      ? [
+          "IMPORTANT — this app already has real frontend code in it. " +
+            "You are NOT building from scratch: do not remove or " +
+            "restructure an existing screen/store/nav route unless the " +
+            "build spec explicitly asks you to change it — integrate " +
+            "your new screens into the existing navigation rather than " +
+            "replacing it.",
+        ]
+      : []),
+    ...(featureWorkflow ? [buildFeatureWorkflowInstructions(featureWorkflow)] : []),
+    "Only respond with plain text and no tool calls once every step " +
+      (featureWorkflow ? "above (code AND docs)" : "above") +
+      " is genuinely complete. A final `npx jest` run will then verify " +
       "your work regardless of what you claim — an empty or premature " +
       "'done' will be caught and reported as a failed run.",
   ].join("\n\n");

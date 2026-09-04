@@ -1,6 +1,6 @@
-import type { ChatMessage, LLMClient, ToolDefinition } from "@app-builder/llm-client";
+import type { ChatMessage, FinishReason, LLMClient, ToolDefinition } from "@app-builder/llm-client";
 import type { DockerRunner } from "./dockerExec.js";
-import { TOOL_DEFINITIONS, type FileTools } from "./tools.js";
+import { PROJECT_DOCS_TOOL_DEFINITIONS, TOOL_DEFINITIONS, type FileTools, type ProjectDocsTools } from "./tools.js";
 
 export interface RunResult {
   iterations: number;
@@ -12,7 +12,8 @@ export interface RunResult {
 export type AgentEvent =
   | { type: "assistant_message"; content: string | null }
   | { type: "tool_call"; name: string; args: unknown }
-  | { type: "tool_result"; name: string; result: string };
+  | { type: "tool_result"; name: string; result: string }
+  | { type: "empty_turn"; finishReason: FinishReason };
 
 export interface RunOptions {
   llmClient: LLMClient;
@@ -39,6 +40,17 @@ export interface RunOptions {
    * TOOL_DEFINITIONS, unchanged for every existing caller.
    */
   toolDefinitions?: ToolDefinition[];
+  /**
+   * Gives the model read_project_doc/write_project_doc tools scoped to a
+   * fixed allowlist of governance docs (features.md, architecture.md,
+   * backlog.md, CHANGELOG.md, docs/designs/<slug>.md) — not a general
+   * project-root sandbox like the Debug Agent's. Undefined by default
+   * (existing callers unaffected); when supplied, its two tool
+   * definitions are appended to the effective toolDefinitions
+   * automatically unless toolDefinitions is also overridden explicitly.
+   * See docs/designs/intake-iteration.md.
+   */
+  projectDocsTools?: ProjectDocsTools;
 }
 
 // Proven sufficient for one resource in Milestone 1. Floor for the
@@ -46,9 +58,15 @@ export interface RunOptions {
 // docs/designs/multi-resource-support.md.
 const MIN_MAX_ITERATIONS = 25;
 const ITERATIONS_PER_RESOURCE = 20;
-// Generous: this model spends tokens on hidden reasoning before visible
-// output, so a small cap risks silently truncating to empty content.
-const DEFAULT_MAX_TOKENS = 4096;
+// Matches intake-agent's ceiling — same model, same "spends tokens on
+// hidden reasoning before visible output" behavior (see bug #2), and a
+// codegen/debug turn is typically more demanding per turn than Intake's
+// one-shot brief (a write_file tool call carries a full file's content
+// as an argument, competing with any reasoning tokens for this same
+// budget). Previously 4096 — too tight, per bug #15 — which risked
+// silently truncating a turn to empty content (no visible text, no tool
+// call) well before the model finished reasoning.
+const DEFAULT_MAX_TOKENS = 8192;
 
 /**
  * A fixed iteration cap that happened to work for one resource won't
@@ -109,7 +127,8 @@ export async function runCodegenLoop(options: RunOptions): Promise<RunResult> {
     dockerRunner,
     maxIterations = defaultMaxIterations(buildSpec),
     onEvent,
-    toolDefinitions = TOOL_DEFINITIONS,
+    projectDocsTools,
+    toolDefinitions = projectDocsTools ? [...TOOL_DEFINITIONS, ...PROJECT_DOCS_TOOL_DEFINITIONS] : TOOL_DEFINITIONS,
   } = options;
 
   const messages: ChatMessage[] = [
@@ -135,7 +154,10 @@ export async function runCodegenLoop(options: RunOptions): Promise<RunResult> {
 
     if (!hasToolCalls && !hasContent) {
       // Empty turn — the model neither acted nor said anything meaningful.
-      // Don't treat this as "done"; nudge it and keep going.
+      // Don't treat this as "done"; nudge it and keep going. Still fire
+      // an event (with the real finishReason, for diagnosability) so the
+      // caller isn't left with total silence — see bug #15.
+      onEvent?.({ type: "empty_turn", finishReason: result.finishReason });
       messages.push({ role: "user", content: EMPTY_RESPONSE_NUDGE });
       continue;
     }
@@ -148,7 +170,7 @@ export async function runCodegenLoop(options: RunOptions): Promise<RunResult> {
         args = {};
       }
       onEvent?.({ type: "tool_call", name: call.function.name, args });
-      const output = await executeTool(call.function.name, args, fileTools, dockerRunner);
+      const output = await executeTool(call.function.name, args, fileTools, dockerRunner, projectDocsTools);
       onEvent?.({ type: "tool_result", name: call.function.name, result: output });
       messages.push({
         role: "tool",
@@ -209,9 +231,17 @@ async function executeTool(
   args: Record<string, unknown>,
   fileTools: FileTools,
   dockerRunner: DockerRunner,
+  projectDocsTools?: ProjectDocsTools,
 ): Promise<string> {
   try {
     switch (name) {
+      case "read_project_doc":
+        if (!projectDocsTools) return "Unknown tool: read_project_doc";
+        return await projectDocsTools.read(String(args.path));
+      case "write_project_doc":
+        if (!projectDocsTools) return "Unknown tool: write_project_doc";
+        await projectDocsTools.write(String(args.path), String(args.content ?? ""));
+        return "ok";
       case "read_file":
         return await fileTools.readFile(String(args.path));
       case "write_file":

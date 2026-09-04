@@ -24,6 +24,7 @@ interface Project {
   name: string;
   stage: ProjectStage;
   createdAt: string;
+  workspacePath: string;
 }
 
 interface Message {
@@ -61,6 +62,12 @@ const RUN_PENDING_PATTERN = /^\[run\] Starting your app/;
 const RUN_TERMINAL_PATTERN = /^\[run:(live|failed)\]/;
 const DEBUG_PROGRESS_PATTERN = /^\[debug\]/;
 const DEBUG_TERMINAL_PATTERN = /^\[debug:(done|failed)\]/;
+// A tool-call summary line (see orchestrator's formatToolCall()) — kept
+// in the chat log at its natural position, but rendered as compact
+// metadata rather than a full chat bubble. Captures the part after the
+// tag so the [build]/[debug] prefix isn't shown for these specifically.
+// See bug #14/#16.
+const TOOL_CALL_LINE_PATTERN = /^\[(?:build|debug)\] (→ .+)$/;
 
 function formatProgress(progress: ProgressSnapshot): string {
   const totals = `${progress.agentLabel} — sent ${progress.totalSentTokens.toLocaleString()} / received ${progress.totalReceivedTokens.toLocaleString()} tokens`;
@@ -438,6 +445,12 @@ function App() {
               ))}
             </select>
           )}
+
+          {selectedProject && !isCreatingProject && (
+            <code className="project-path" title={selectedProject.workspacePath}>
+              {selectedProject.workspacePath}
+            </code>
+          )}
         </div>
 
         {isCreatingProject && (
@@ -492,18 +505,28 @@ function App() {
         {selectedProjectId && messages.length === 0 && (
           <p className="chat-empty">Say something to get started.</p>
         )}
-        {messages.map((message, index) => (
-          <div key={index} className={`chat-message chat-message--${message.role}`}>
-            <span className="chat-message__role">
-              {message.role === "user"
-                ? "You"
-                : message.role === "assistant"
-                  ? "Assistant"
-                  : "Error"}
-            </span>
-            <p>{message.content}</p>
-          </div>
-        ))}
+        {messages.map((message, index) => {
+          const toolCallMatch = TOOL_CALL_LINE_PATTERN.exec(message.content);
+          if (toolCallMatch) {
+            return (
+              <div key={index} className="chat-tool-call">
+                {toolCallMatch[1]}
+              </div>
+            );
+          }
+          return (
+            <div key={index} className={`chat-message chat-message--${message.role}`}>
+              <span className="chat-message__role">
+                {message.role === "user"
+                  ? "You"
+                  : message.role === "assistant"
+                    ? "Assistant"
+                    : "Error"}
+              </span>
+              <p>{message.content}</p>
+            </div>
+          );
+        })}
         {isSending && <div className="chat-message chat-message--assistant">…</div>}
       </div>
 

@@ -25,6 +25,10 @@ export function buildSystemPrompt(): string {
       "brief describing the Rails resource(s) it implies, their fields, " +
       "and the screens a real user would need — for a downstream Codegen " +
       "Agent to build. You do not write any code yourself.",
+    "If you are producing a spec (not a clarifying question), start your " +
+      "response with a single line `# <Feature Title>` — a short, " +
+      "specific title for this request, used downstream to name its " +
+      "design doc — before the resource/screens blocks.",
     `Allowed field types (Rails migration column types): ${FIELD_TYPES.join(", ")}.`,
     "A description can imply ONE resource or SEVERAL related ones — " +
       "there is no cap on how many. Describe every resource the " +
@@ -51,14 +55,14 @@ export function buildSystemPrompt(): string {
       "## Screens\n### <Screen Name>\nObjective: <why this screen exists, " +
       "what the user is trying to do>\nShows: <what's on screen, how it " +
       "behaves, where it navigates>",
-    "Single-resource example:\n\n## Resource\nTask\n\n## Fields\n" +
+    "Single-resource example:\n\n# Task Tracker\n\n## Resource\nTask\n\n## Fields\n" +
       "- title: string\n- done: boolean\n\n## Screens\n### Task List\n" +
       "Objective: Let the user see and manage all their tasks.\nShows: a " +
       "checklist of tasks (title + done toggle); a button to add a new " +
       "task; tapping a task opens Task Edit.\n\n### Task Edit\n" +
       "Objective: Create or edit one task's title and done status.\n" +
       "Shows: a form (title text field, done toggle) with save/cancel.",
-    "Multi-resource example (a List that has many Items):\n\n" +
+    "Multi-resource example (a List that has many Items):\n\n# Shopping Lists\n\n" +
       "## Resource\nList\n\n## Fields\n- name: string\n\n" +
       "## Associations\n- has_many :items\n\n" +
       "## Resource\nItem\n\n## Fields\n- title: string\n- done: boolean\n\n" +
@@ -84,5 +88,40 @@ export function buildSystemPrompt(): string {
       "to ask a clarifying question.",
     "Respond with plain text only — no tool calls, no extra commentary " +
       "before or after the shape above.",
+  ].join("\n\n");
+}
+
+/**
+ * Existing-state context for an already-built project — see
+ * docs/designs/intake-iteration.md. Read directly off disk by the
+ * orchestrator (docs/blueprints/features.md, architecture.md,
+ * backlog.md), not gathered by this agent itself (it has no tools).
+ */
+export interface ExistingProjectContext {
+  features: string;
+  architecture: string;
+  backlog: string;
+}
+
+/**
+ * Same resource/screens shape as buildSystemPrompt(), plus the target
+ * project's own current state so the model describes a delta, not a
+ * full redescription — used once a project has real content already
+ * (see docs/backlog.md bug #16 / feature #18).
+ */
+export function buildIncrementalSystemPrompt(existing: ExistingProjectContext): string {
+  return [
+    buildSystemPrompt(),
+    "IMPORTANT — this app already has real work in it. You are NOT " +
+      "describing a new app from scratch: describe only the new " +
+      "resource(s)/screen(s) this request needs, or a continuation of " +
+      "an already-in-progress one shown below. Do not redescribe " +
+      "anything that already exists unless the request explicitly asks " +
+      "to change it. Still start your response with a `# <Feature " +
+      "Title>` line — if this continues an in-progress feature from the " +
+      "backlog below, reuse that feature's existing title exactly.",
+    `What already exists (this project's own docs/blueprints/features.md):\n\n${existing.features}`,
+    `Current architecture (docs/blueprints/architecture.md):\n\n${existing.architecture}`,
+    `Feature history, including anything still in progress (docs/backlog.md):\n\n${existing.backlog}`,
   ].join("\n\n");
 }

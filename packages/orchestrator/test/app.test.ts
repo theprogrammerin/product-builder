@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import request from "supertest";
 import type { ChatCompletionRequest, ChatCompletionResult, LLMClient, Usage } from "@app-builder/llm-client";
@@ -5,6 +8,13 @@ import type { RunAgent, StartResult } from "@app-builder/run-agent";
 import {
   createApp,
   defaultRunIntakePhase,
+  deriveFeatureSlug,
+  filterHistoryForIntake,
+  formatEmptyTurn,
+  formatToolCall,
+  isNoisyProgressMessage,
+  readExistingProjectContext,
+  slugify,
   type CodegenOutcome,
   type DebugOutcome,
   type IntakeOutcome,
@@ -992,6 +1002,52 @@ describe("POST /api/chat — /debug", () => {
   });
 });
 
+describe("formatToolCall", () => {
+  it("summarizes a path-based tool call", () => {
+    expect(formatToolCall("write_file", { path: "app/models/note.rb", content: "..." })).toBe(
+      "→ write_file: app/models/note.rb",
+    );
+    expect(formatToolCall("read_file", { path: "app/models/note.rb" })).toBe("→ read_file: app/models/note.rb");
+    expect(formatToolCall("list_dir", { path: "app" })).toBe("→ list_dir: app");
+    expect(formatToolCall("list_files", { path: "app" })).toBe("→ list_files: app");
+  });
+
+  it("summarizes the project-doc tools with their path too", () => {
+    expect(formatToolCall("read_project_doc", { path: "docs/backlog.md" })).toBe("→ read_project_doc: docs/backlog.md");
+    expect(formatToolCall("write_project_doc", { path: "docs/designs/x.md", content: "..." })).toBe(
+      "→ write_project_doc: docs/designs/x.md",
+    );
+  });
+
+  it("summarizes search_files with its pattern", () => {
+    expect(formatToolCall("search_files", { pattern: "CORS", path: "app" })).toBe('→ search_files: "CORS"');
+  });
+
+  it("summarizes run_command with the actual command", () => {
+    expect(formatToolCall("run_command", { command: "bundle exec rspec" })).toBe("→ run_command: bundle exec rspec");
+  });
+
+  it("falls back to just the tool name when the expected arg is missing or the tool is unknown", () => {
+    expect(formatToolCall("write_file", {})).toBe("→ write_file");
+    expect(formatToolCall("run_command", {})).toBe("→ run_command");
+    expect(formatToolCall("some_future_tool", { foo: "bar" })).toBe("→ some_future_tool");
+    expect(formatToolCall("list_files", undefined)).toBe("→ list_files");
+  });
+});
+
+describe("formatEmptyTurn", () => {
+  it("names the token budget explicitly when finishReason is length", () => {
+    expect(formatEmptyTurn("length")).toBe("→ empty turn — ran out of token budget, nudging model to continue");
+  });
+
+  it("names the actual finishReason otherwise, for diagnosability", () => {
+    expect(formatEmptyTurn("stop")).toBe("→ empty turn (finishReason: stop) — nudging model to continue");
+    expect(formatEmptyTurn("content_filter")).toBe(
+      "→ empty turn (finishReason: content_filter) — nudging model to continue",
+    );
+  });
+});
+
 describe("defaultRunIntakePhase", () => {
   it("reports usage via onUsage and returns the reply content unchanged", async () => {
     const chat = vi.fn(
@@ -1034,6 +1090,31 @@ describe("defaultRunIntakePhase", () => {
 
     expect(result.content).toBe("## Resource\nTask");
     expect(onUsage).not.toHaveBeenCalled();
+  });
+
+  it("uses the incremental system prompt (with the existing-state context) when existingContext is supplied", async () => {
+    const chat = vi.fn(
+      async (_request: ChatCompletionRequest): Promise<ChatCompletionResult> => ({
+        message: { role: "assistant", content: "## Resource\nReminder\n" },
+        finishReason: "stop",
+      }),
+    );
+
+    await defaultRunIntakePhase({
+      description: "add reminders",
+      llmClient: { chat },
+      existingContext: {
+        features: "## Current state\n\nA Task resource.",
+        architecture: "Rails + Expo.",
+        backlog: "| 1 | Initial build | done | | |",
+      },
+      onCallStart: vi.fn(),
+      onUsage: vi.fn(),
+    });
+
+    const systemPrompt = chat.mock.calls[0][0].messages[0].content as string;
+    expect(systemPrompt.toLowerCase()).toContain("already has real work in it");
+    expect(systemPrompt).toContain("A Task resource.");
   });
 });
 
@@ -1172,5 +1253,242 @@ describe("GET /api/projects/:id/progress", () => {
 
     resolveSecond({ kind: "done", content: "done" });
     await flush();
+  });
+});
+
+describe("isNoisyProgressMessage", () => {
+  it("flags interim [build]/[debug] narration as noisy", () => {
+    expect(isNoisyProgressMessage({ role: "assistant", content: "[build] Writing the model..." })).toBe(true);
+    expect(isNoisyProgressMessage({ role: "assistant", content: "[build] → write_file: app/models/x.rb" })).toBe(
+      true,
+    );
+    expect(isNoisyProgressMessage({ role: "assistant", content: "[debug] Reading the logs..." })).toBe(true);
+  });
+
+  it("flags the [run] pending line as noisy", () => {
+    expect(isNoisyProgressMessage({ role: "assistant", content: "[run] Starting your app..." })).toBe(true);
+  });
+
+  it("does not flag terminal outcome tags — a real 'what happened' signal is useful, per bug #17", () => {
+    expect(isNoisyProgressMessage({ role: "assistant", content: "[build:done] Build complete — ..." })).toBe(false);
+    expect(
+      isNoisyProgressMessage({ role: "assistant", content: "[build:failed] Build failed: GLM request timed out" }),
+    ).toBe(false);
+    expect(isNoisyProgressMessage({ role: "assistant", content: "[build:question] What should..." })).toBe(false);
+    expect(isNoisyProgressMessage({ role: "assistant", content: "[build:review] Proposed plan..." })).toBe(false);
+    expect(isNoisyProgressMessage({ role: "assistant", content: "[run:live] Your app is running..." })).toBe(false);
+    expect(isNoisyProgressMessage({ role: "assistant", content: "[run:failed] ..." })).toBe(false);
+    expect(isNoisyProgressMessage({ role: "assistant", content: "[debug:done] ..." })).toBe(false);
+    expect(isNoisyProgressMessage({ role: "assistant", content: "[stop:done] Stopped..." })).toBe(false);
+  });
+
+  it("does not flag plain conversation or user messages", () => {
+    expect(isNoisyProgressMessage({ role: "assistant", content: "Sure, happy to help." })).toBe(false);
+    expect(isNoisyProgressMessage({ role: "user", content: "[build] this looks like a tag but is a user message" })).toBe(
+      false,
+    );
+    expect(isNoisyProgressMessage({ role: "assistant", content: null })).toBe(false);
+  });
+});
+
+describe("filterHistoryForIntake", () => {
+  it("drops only the noisy interim messages, keeping everything else in order", () => {
+    const history = [
+      { role: "user" as const, content: "I want email/password login" },
+      { role: "assistant" as const, content: "Got it, noted." },
+      { role: "user" as const, content: "/build a task tracker" },
+      { role: "assistant" as const, content: "[build:review] Proposed plan..." },
+      { role: "user" as const, content: "/proceed" },
+      { role: "assistant" as const, content: "[build] Got it — starting the build." },
+      { role: "assistant" as const, content: "[build] → write_file: app/models/task.rb" },
+      { role: "assistant" as const, content: "[build:failed] Build failed: GLM request timed out after 60000ms" },
+    ];
+
+    expect(filterHistoryForIntake(history)).toEqual([
+      { role: "user", content: "I want email/password login" },
+      { role: "assistant", content: "Got it, noted." },
+      { role: "user", content: "/build a task tracker" },
+      { role: "assistant", content: "[build:review] Proposed plan..." },
+      { role: "user", content: "/proceed" },
+      { role: "assistant", content: "[build:failed] Build failed: GLM request timed out after 60000ms" },
+    ]);
+  });
+});
+
+describe("slugify", () => {
+  it("lowercases, replaces non-alphanumerics with hyphens, and trims edges", () => {
+    expect(slugify("Add Reminders to Tasks")).toBe("add-reminders-to-tasks");
+    expect(slugify("  Multi   space--title! ")).toBe("multi-space-title");
+  });
+
+  it("falls back to a timestamp-based slug for an empty/unsluggable title", () => {
+    expect(slugify("")).toMatch(/^feature-\d+$/);
+    expect(slugify("!!!")).toMatch(/^feature-\d+$/);
+  });
+});
+
+describe("deriveFeatureSlug", () => {
+  it("extracts the # <Feature Title> line and slugifies it", () => {
+    const content = "# Add Reminders\n\n## Resource\nReminder\n\n## Fields\n- due_at: datetime\n";
+    expect(deriveFeatureSlug(content)).toBe("add-reminders");
+  });
+
+  it("falls back to a timestamp-based slug when there's no title line", () => {
+    expect(deriveFeatureSlug("## Resource\nTask\n")).toMatch(/^feature-\d+$/);
+  });
+});
+
+describe("readExistingProjectContext", () => {
+  let workspacePath: string;
+
+  async function withDocs() {
+    await mkdir(path.join(workspacePath, "docs/blueprints"), { recursive: true });
+  }
+
+  it("returns undefined for a project with no docs/blueprints/features.md at all", async () => {
+    workspacePath = await mkdtemp(path.join(tmpdir(), "orchestrator-context-test-"));
+    try {
+      expect(await readExistingProjectContext(workspacePath)).toBeUndefined();
+    } finally {
+      await rm(workspacePath, { recursive: true, force: true });
+    }
+  });
+
+  it("returns undefined while features.md still reads the scaffold's stub text", async () => {
+    workspacePath = await mkdtemp(path.join(tmpdir(), "orchestrator-context-test-"));
+    try {
+      await withDocs();
+      await writeFile(
+        path.join(workspacePath, "docs/blueprints/features.md"),
+        "# Feature Blueprint\n\nNothing built yet beyond the initial structural skeleton.\n",
+      );
+      expect(await readExistingProjectContext(workspacePath)).toBeUndefined();
+    } finally {
+      await rm(workspacePath, { recursive: true, force: true });
+    }
+  });
+
+  it("returns the real features/architecture/backlog content once a build has left real content there — regardless of pass/fail", async () => {
+    workspacePath = await mkdtemp(path.join(tmpdir(), "orchestrator-context-test-"));
+    try {
+      await withDocs();
+      await writeFile(path.join(workspacePath, "docs/blueprints/features.md"), "## Current state\n\nA Task resource.");
+      await writeFile(path.join(workspacePath, "docs/blueprints/architecture.md"), "Rails + Expo.");
+      await writeFile(path.join(workspacePath, "docs/backlog.md"), "| 1 | Initial build | building | | |");
+
+      const context = await readExistingProjectContext(workspacePath);
+
+      expect(context).toEqual({
+        features: "## Current state\n\nA Task resource.",
+        architecture: "Rails + Expo.",
+        backlog: "| 1 | Initial build | building | | |",
+      });
+    } finally {
+      await rm(workspacePath, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("POST /api/chat — /build against an already-built project", () => {
+  it("passes existingContext to runIntakePhase and threads isIncremental through to /proceed", async () => {
+    const workspacePath = await mkdtemp(path.join(tmpdir(), "orchestrator-incremental-test-"));
+    try {
+      await mkdir(path.join(workspacePath, "docs/blueprints"), { recursive: true });
+      await writeFile(path.join(workspacePath, "docs/blueprints/features.md"), "## Current state\n\nA Task resource.");
+      await writeFile(path.join(workspacePath, "docs/blueprints/architecture.md"), "Rails + Expo.");
+      await writeFile(path.join(workspacePath, "docs/backlog.md"), "| 1 | Initial build | done | | |");
+
+      const scaffold: Scaffold = vi.fn(async () => workspacePath);
+      const runIntakePhase = fakeRunIntakePhase({ kind: "spec", content: "# Add Reminders\n\n## Resource\nReminder\n" });
+      const runCodegenPhase = fakeRunCodegenPhase({ kind: "done", content: "done" });
+      const app = createApp(
+        fakeLlmClient(),
+        healthInfo,
+        undefined,
+        undefined,
+        scaffold,
+        runIntakePhase,
+        runCodegenPhase,
+      );
+      const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+      const projectId = created.body.project.id;
+
+      await request(app).post("/api/chat").send({ projectId, message: "/build add a reminder to each task" });
+
+      expect(runIntakePhase).toHaveBeenCalledWith(
+        expect.objectContaining({
+          existingContext: {
+            features: "## Current state\n\nA Task resource.",
+            architecture: "Rails + Expo.",
+            backlog: "| 1 | Initial build | done | | |",
+          },
+        }),
+      );
+
+      await request(app).post("/api/chat").send({ projectId, message: "/proceed" });
+
+      expect(runCodegenPhase).toHaveBeenCalledWith(
+        expect.objectContaining({ featureSlug: "add-reminders", isIncremental: true }),
+      );
+    } finally {
+      await rm(workspacePath, { recursive: true, force: true });
+    }
+  });
+
+  it("passes prior plain-chat history to Intake, filtered of noisy progress tags (bug #17)", async () => {
+    const runIntakePhase = fakeRunIntakePhase({ kind: "spec", content: "# Task Tracker\n\n## Resource\nTask\n" });
+    const app = createApp(
+      fakeLlmClient("Got it, noted for later."),
+      healthInfo,
+      undefined,
+      undefined,
+      fakeScaffold(),
+      runIntakePhase,
+    );
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    // Plain chat before the /build — should be visible to Intake.
+    await request(app).post("/api/chat").send({ projectId, message: "I want email/password login" });
+    // A noisy interim progress message that might already be sitting in
+    // history from some earlier operation — should NOT be visible.
+    // (Appended directly since nothing in this test drives a real build.)
+
+    await request(app).post("/api/chat").send({ projectId, message: "/build a task tracker" });
+
+    expect(runIntakePhase).toHaveBeenCalledWith(
+      expect.objectContaining({
+        history: [
+          { role: "user", content: "I want email/password login" },
+          { role: "assistant", content: "Got it, noted for later." },
+        ],
+      }),
+    );
+  });
+
+  it("passes existingContext: undefined and isIncremental: false for a fresh project", async () => {
+    const runIntakePhase = fakeRunIntakePhase({ kind: "spec", content: "# Task Tracker\n\n## Resource\nTask\n" });
+    const runCodegenPhase = fakeRunCodegenPhase({ kind: "done", content: "done" });
+    const app = createApp(
+      fakeLlmClient(),
+      healthInfo,
+      undefined,
+      undefined,
+      fakeScaffold(),
+      runIntakePhase,
+      runCodegenPhase,
+    );
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    await request(app).post("/api/chat").send({ projectId, message: "/build a task tracker" });
+
+    expect(runIntakePhase).toHaveBeenCalledWith(expect.objectContaining({ existingContext: undefined }));
+
+    await request(app).post("/api/chat").send({ projectId, message: "/proceed" });
+
+    expect(runCodegenPhase).toHaveBeenCalledWith(
+      expect.objectContaining({ featureSlug: "task-tracker", isIncremental: false }),
+    );
   });
 });
