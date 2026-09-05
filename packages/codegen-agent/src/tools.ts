@@ -176,6 +176,72 @@ export const PROJECT_DOCS_TOOL_DEFINITIONS: ToolDefinition[] = [
   },
 ];
 
+/**
+ * The planning stage's tools (feature #22 / bug #19+#20+#21's follow-up
+ * — see docs/designs/planning-stage.md): the same read/explore tool
+ * *names* executeTool() already dispatches, plus the project-docs pair,
+ * but deliberately missing write_file and run_command — the model is
+ * simply never offered those two, so it structurally cannot write or
+ * run application code during planning, only read and write governance
+ * docs. Descriptions say "project root" (not backend/ or frontend/)
+ * since planning's fileTools are rooted there, like the Debug Agent's.
+ */
+export const PLANNING_TOOL_DEFINITIONS: ToolDefinition[] = [
+  {
+    type: "function",
+    function: {
+      name: "read_file",
+      description: "Read the contents of a file. Path is relative to the project root — use \"backend/...\" or \"frontend/...\".",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_dir",
+      description: "List immediate entries in a directory. Path is relative to the project root.",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_files",
+      description:
+        "Recursively list every file under a path (default: the whole project root), skipping .git/tmp/log/node_modules. Prefer this over repeated list_dir calls.",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_files",
+      description:
+        "Grep-style search for a regex pattern across file contents under a path (default: the whole project root). Returns matching {path, line, text}.",
+      parameters: {
+        type: "object",
+        properties: {
+          pattern: { type: "string" },
+          path: { type: "string" },
+        },
+        required: ["pattern"],
+      },
+    },
+  },
+  ...PROJECT_DOCS_TOOL_DEFINITIONS,
+];
+
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: "function",

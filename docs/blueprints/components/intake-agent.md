@@ -40,7 +40,14 @@ Usable two ways: the standalone CLI, or as a library —
   `buildIncrementalSystemPrompt(existing)` — same shape, plus the target
   project's current `features.md`/`architecture.md`/`backlog.md`, for
   when the request is against an already-built project — see feature
-  #18 ([intake-iteration.md](../../designs/intake-iteration.md))
+  #18 ([intake-iteration.md](../../designs/intake-iteration.md)).
+  `existing.inProgressDesignDocs` (bug #19) additionally carries the
+  design doc(s) for any backlog row not yet `done`/`fixed` — their
+  Outcome sections let a vague "continue" request become a targeted
+  delta instead of a generic clarifying question or a full
+  redescription, since Intake can see exactly what's already done and
+  what's left — see
+  [build-context-and-resume.md](../../designs/build-context-and-resume.md)
 
 ## Design principle: markdown in, markdown out, no parser
 

@@ -19,6 +19,13 @@ export interface ChatMessage {
   toolCallId?: string;
   /** Required on role "tool" messages: the tool/function name. */
   name?: string;
+  /**
+   * ISO 8601 timestamp — set only by a chat store's own `get()`, never by
+   * code building a fresh message for an LLM call. Left undefined there
+   * on purpose: `JSON.stringify` drops undefined fields, so this never
+   * leaks into an outbound LLM request. See feature #23.
+   */
+  createdAt?: string;
 }
 
 export interface ToolDefinition {

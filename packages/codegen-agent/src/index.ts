@@ -6,6 +6,7 @@ export {
   buildSystemPrompt,
   buildFrontendSystemPrompt,
   buildFeatureWorkflowInstructions,
+  buildPlanningSystemPrompt,
   loadBuildSpec,
 } from "./promptContext.js";
 export type { FeatureWorkflowContext } from "./promptContext.js";
@@ -17,5 +18,6 @@ export {
   PathEscapeError,
   TOOL_DEFINITIONS,
   PROJECT_DOCS_TOOL_DEFINITIONS,
+  PLANNING_TOOL_DEFINITIONS,
 } from "./tools.js";
 export type { FileTools, ProjectDocsTools } from "./tools.js";

@@ -36,14 +36,18 @@ describe("runDebugAgent", () => {
     expect(deps.assembleInitialContext).toHaveBeenCalledWith(
       expect.objectContaining({ description: "bug", workspacePath: "/workspace" }),
     );
-    expect(deps.runCodegenLoop).toHaveBeenCalledTimes(2);
+    // Backend pass, frontend pass, and the forced doc-logging epilogue
+    // (bug #19) — see docs/designs/build-context-and-resume.md.
+    expect(deps.runCodegenLoop).toHaveBeenCalledTimes(3);
 
-    const [backendCall, frontendCall] = (deps.runCodegenLoop as ReturnType<typeof vi.fn>).mock.calls.map(
+    const [backendCall, frontendCall, epilogueCall] = (deps.runCodegenLoop as ReturnType<typeof vi.fn>).mock.calls.map(
       (c) => c[0] as RunOptions,
     );
     expect(backendCall.buildSpec).toBe("context");
     expect(backendCall.systemPrompt).toContain("BACKEND");
     expect(frontendCall.systemPrompt).toContain("FRONTEND");
+    expect(epilogueCall.systemPrompt).toContain("19 examples, 0 failures");
+    expect(epilogueCall.systemPrompt).toContain("Tests: 5 passed, 5 total");
 
     expect(result.fixed).toBe(true);
     expect(result.summary).toContain("19 examples, 0 failures");
@@ -107,5 +111,25 @@ describe("runDebugAgent", () => {
       typeof fakeDocker
     >;
     expect(backendDocker.down).toHaveBeenCalledTimes(1);
+  });
+
+  it("still attempts the doc-logging epilogue after a thrown error, mentioning it in the outcome (bug #19)", async () => {
+    let call = 0;
+    const deps = makeDeps({
+      runCodegenLoop: vi.fn(async (options: RunOptions): Promise<RunResult> => {
+        call += 1;
+        if (call === 1) throw new Error("GLM request timed out after 60000ms");
+        // The epilogue call (2nd — the backend pass threw before the
+        // frontend pass could even run) — assert it saw the failure.
+        expect(options.systemPrompt).toContain("GLM request timed out after 60000ms");
+        return { iterations: 1, converged: true, transcript: [] };
+      }),
+    });
+
+    await expect(runDebugAgent({ llmClient, workspacePath: "/workspace" }, deps)).rejects.toThrow(
+      "GLM request timed out after 60000ms",
+    );
+
+    expect(deps.runCodegenLoop).toHaveBeenCalledTimes(2);
   });
 });

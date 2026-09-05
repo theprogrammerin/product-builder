@@ -86,6 +86,68 @@ an explicit "this app already has real code — don't break/rename/
 duplicate it" warning. See feature #18/bug #16 —
 [intake-iteration.md](../../designs/intake-iteration.md).
 
+`FeatureWorkflowContext` also carries an optional `inProgressDesignDocs:
+{ slug, content }[]` (bug #19) — design docs for any of this project's
+backlog rows not yet `done`/`fixed`, supplied by the orchestrator. Unlike
+the final-step instruction above (which only tells the model to *read*
+the matching doc right before finishing), this content is included
+directly in the *initial* system prompt via
+`buildInProgressDesignDocsSection()`, telling the model to trust the
+Outcome sections as authoritative for what's already verified passing
+and skip re-exploring/re-verifying it — cutting the from-scratch
+re-discovery every phase invocation otherwise does. See
+[build-context-and-resume.md](../../designs/build-context-and-resume.md).
+
+`buildInProgressDesignDocsSection()` takes a `side: "backend" | "frontend"`
+param (bug #20) — a regression caught live: the model would correctly
+conclude "my side is done, remaining work is on the other side" but then
+loop trying to explore/verify that other side anyway, unable to reach it
+(each phase's `fileTools` is rooted at just `backend/` or `frontend/`).
+The section now explicitly says which directory the model's tools are
+scoped to, that the other side is unreachable from here, and to do one
+quick verification then stop immediately with a plain-text summary if
+all that's left is on the other side.
+
+`buildFeatureWorkflowInstructions()` also takes an optional `side`
+param (bug #21) — a second regression caught on the very next live run:
+telling a phase "you can't reach the other side" (bug #20) was true for
+*that phase*, but when it got paraphrased into a persisted doc
+(`docs/backlog.md`) it lost that scoping and read as a permanent claim
+about "the Codegen Agent," which a later run of the *other* phase then
+echoed back even though it could plainly reach that work. The
+instruction now tells the model to phrase other-side work as needing
+that side's *phase* to complete it (e.g. "needs a frontend-phase
+build"), never as unreachable or out of scope. Threaded through both
+`buildSystemPrompt("backend")`/`buildFrontendSystemPrompt("frontend")`
+and the orchestrator's `runFeatureWorkflowEpilogue` (which now takes a
+`side` param too, set from `defaultRunCodegenPhase`'s existing
+`currentPhase` tracker).
+
+### Planning stage (feature #22)
+
+New `buildPlanningSystemPrompt()` and `PLANNING_TOOL_DEFINITIONS`
+(`tools.ts`) — a bounded, read-only pass the orchestrator runs before
+any code-writing phase on an incremental build, motivated by three
+consecutive live GLM timeouts on the same feature: each one hit right
+after 30+ tool calls of re-exploring the whole relevant directory,
+before any code got written. `PLANNING_TOOL_DEFINITIONS` offers the same
+five explore-tool names plus `read_project_doc`/`write_project_doc`,
+deliberately missing `write_file`/`run_command` — the model is simply
+never offered those two, so it structurally cannot write or run
+application code during planning. Its system prompt asks it to decide
+`Scope: backend-only | frontend-only | both` and write a concrete
+file-level plan into the design doc's own `## Plan` section, reusing an
+existing accurate plan rather than re-deriving one.
+
+`buildInProgressDesignDocsSection()` also detects a `## Plan` heading in
+any fed-in design doc and appends a hard, side-aware instruction: treat
+it as the authoritative task list, do not call `list_files`/`list_dir`
+broadly or read files it doesn't name, open exactly what it lists. This
+is deliberately stronger than the existing "don't spend more than 2-3
+tool calls exploring" line already in both system prompts — live
+evidence (30+ exploration calls per run) showed that softer phrasing
+alone wasn't enough once a phase decided broader context was warranted.
+
 ## CLI interface
 
 ```

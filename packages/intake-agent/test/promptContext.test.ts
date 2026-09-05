@@ -58,6 +58,7 @@ describe("buildIncrementalSystemPrompt", () => {
     features: "## Current state\n\nA Task resource with title/done.",
     architecture: "Rails + Expo, standard shape.",
     backlog: "| 1 | Initial build | done | | [task-tracker.md](designs/task-tracker.md) |",
+    inProgressDesignDocs: [],
   };
 
   it("includes the same resource/screens shape as buildSystemPrompt", () => {
@@ -78,5 +79,22 @@ describe("buildIncrementalSystemPrompt", () => {
     const prompt = buildIncrementalSystemPrompt(existing).toLowerCase();
     expect(prompt).toContain("not describing a new app from scratch");
     expect(prompt).toContain("do not redescribe");
+  });
+
+  it("includes in-progress design docs and instructs treating them as authoritative", () => {
+    const prompt = buildIncrementalSystemPrompt({
+      ...existing,
+      inProgressDesignDocs: [
+        { slug: "voice-notes", content: "## Outcome\n\nBackend: 57/57 passing. Left: frontend wiring." },
+      ],
+    });
+    expect(prompt).toContain("### voice-notes");
+    expect(prompt).toContain("Backend: 57/57 passing. Left: frontend wiring.");
+    expect(prompt.toLowerCase()).toContain("authoritative record of exactly what's done and what's left");
+  });
+
+  it("omits the in-progress design docs section when there are none", () => {
+    const prompt = buildIncrementalSystemPrompt(existing);
+    expect(prompt.toLowerCase()).not.toContain("in-progress design doc(s)");
   });
 });

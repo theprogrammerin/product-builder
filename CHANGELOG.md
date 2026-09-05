@@ -7,6 +7,113 @@ together.
 
 ## Unreleased
 
+### Timestamps on chat bubbles (feature #23)
+
+Each chat bubble now shows a small, muted timestamp — bottom-right for
+your own messages, bottom-left for the assistant's/errors. `ChatMessage`
+gained an optional `createdAt` field, populated only when *reading* from
+a chat store (the Postgres store maps its existing `created_at` column;
+the in-memory store stamps it at `append()` time) — code building a
+fresh message for an LLM call never sets it, so it never leaks into an
+outbound request (a new `stripTimestamps()` helper strips it explicitly
+from history used to build `/build`'s Intake call and ordinary chat
+turns, as a belt-and-suspenders measure).
+
+### Fix: raised the GLM request timeout to stop live builds from failing mid-context (bug #22)
+
+`GLM_TIMEOUT_MS` was 60000 (60s) — too tight for a call carrying a large
+accumulated context. Root cause behind the repeated `GLM request timed
+out after 60000ms` failures during "test_project"'s live verification:
+three consecutive coding-phase timeouts, then the new planning stage
+(feature #22) hitting the same wall exploring both sides at once, all
+right after 25-30+ tool calls' worth of file content had built up in
+context. The exception-path epilogue (bug #19) correctly recovered with
+an honest doc update every time, but the underlying attempt never got to
+do real work. Raised to 180000 (3 min) in `packages/orchestrator/.env`.
+
+### A planning stage scopes and sequences incremental builds (feature #22)
+
+Three consecutive live runs on the same "test_project" feature hit a
+`GLM request timed out after 60000ms` at almost the same point — right
+after 30+ tool calls of re-exploring the whole relevant directory,
+before any code got written — and a one-sided request (backend already
+done, only frontend wiring left) still ran the backend phase just to
+have it conclude there was nothing to do. Added a bounded, read-only
+planning stage (reusing `runCodegenLoop`, no new package) that runs
+before any code-writing phase on an incremental build: it decides
+whether backend, frontend, or both need work, and writes a concrete,
+file-level plan into the design doc. The orchestrator skips whichever
+phase the plan says has nothing to do, and the phase(s) that do run are
+given a hard instruction to execute the plan directly — no broad
+`list_files`/`list_dir` discovery — rather than re-surveying the
+codebase from scratch. Because the plan is persisted in the design doc,
+it also survives disruption: an interrupted run's plan is found and
+reused by the next attempt instead of being re-derived from zero. See
+[`planning-stage.md`](docs/designs/planning-stage.md).
+
+### Fix: a phase's docs no longer claim remaining work is permanently unreachable (bug #21)
+
+Found live immediately after bug #20's fix, on the very next run: when a
+phase's run ends via the exception-path epilogue instead of writing real
+code, its summary could read as a permanent, architectural claim — "...
+are entirely frontend work that this agent cannot reach" — even though
+that same run's frontend phase had just been reading real frontend files
+seconds earlier. Root cause: bug #20's own instruction ("your tools only
+reach backend/... cannot reach frontend/ code") is accurate when said by
+one phase about itself, but got paraphrased into `docs/backlog.md` as a
+generic claim about "the Codegen Agent," losing which phase it was
+scoped to — a later frontend-phase run then echoed that over-generalized
+text back. Fixed by telling the model explicitly, when documenting
+other-side work, to phrase it as needing that side's *phase* to complete
+it (e.g. "needs a frontend-phase build"), never as unreachable or out of
+scope.
+
+### Fix: incremental build no longer loops in the wrong phase when only the other side has work left (bug #20)
+
+Regression surfaced live on "test_project" by bug #19's own fix: the
+backend phase would correctly read the design doc and conclude "backend
+is passing, this request is about frontend," then get stuck repeatedly
+re-confirming that and searching outside its own `backend/`-only
+sandbox for frontend files it structurally cannot reach (`ls /app/..`,
+hunting for `docker-compose.yml`/`App.tsx`) — ~50 tool calls and 274k+
+sent tokens on one run before it was caught. Fixed by telling each phase,
+directly in its own in-progress-design-doc context, that its tools only
+reach its own side and it should do a quick verification and stop
+immediately (not keep exploring) when the design doc says all remaining
+work is on the other side.
+
+### Interrupted/failed builds and debug runs now leave a real, resumable record (bug #19)
+
+A `/build` run that ended in a thrown exception (a provider timeout or
+rate-limit, not a test failure) used to skip the doc-writing epilogue
+entirely — `docs/blueprints/features.md`/`backlog.md`/`CHANGELOG.md`
+were left describing whatever state existed *before* that attempt, even
+though real code was often already on disk. The epilogue now runs on
+every non-success exit, exception included. `/debug` gets the same
+guarantee via a new bounded doc-logging follow-up pass, forced
+regardless of whether its two passes converged, failed, or threw.
+
+Separately, a follow-up `/build` against a project with unfinished work
+(even a vague "continue") now has the specific in-progress design
+doc(s) — whose Outcome sections already record exactly what's done and
+what's left — included in both the Intake Agent's incremental prompt and
+the Codegen Agent's *starting* context (previously only read at the very
+end, right before finishing). A continuation request can now target
+what's actually left instead of re-describing the whole feature or
+re-verifying everything from a standing start. See
+[`build-context-and-resume.md`](docs/designs/build-context-and-resume.md).
+
+### Print/export the full chat transcript (feature request #20)
+
+A "Print" button now lets you print a project's complete chat transcript
+— previously, the page's fixed-height, scrollable chat log meant a
+native browser print only captured whatever was currently scrolled into
+view. `@media print` CSS un-constrains the layout, hides interactive
+chrome (dropdowns, input, Auto-refresh, the token-usage footer), and
+switches to a plain light palette; a print-only header shows the project
+name, workspace path, and print timestamp. Pure client-side — the full
+transcript is already loaded once a project is selected.
+
 ### Fix: `/build` couldn't see anything said in prior plain chat (bug #17)
 
 Intake was only ever handed the exact text after `/build` — ordinary

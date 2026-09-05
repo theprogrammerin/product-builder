@@ -13,8 +13,12 @@ import {
   formatEmptyTurn,
   formatToolCall,
   isNoisyProgressMessage,
+  mergeDesignDoc,
+  parseInProgressDesignDocSlugs,
+  parsePlanScope,
   readExistingProjectContext,
   slugify,
+  stripTimestamps,
   type CodegenOutcome,
   type DebugOutcome,
   type IntakeOutcome,
@@ -243,6 +247,36 @@ describe("POST /api/chat", () => {
       "second reply",
       "second message",
     ]);
+  });
+
+  it("does not send createdAt to the LLM, even though history carries it internally (feature #23)", async () => {
+    const llmClient = fakeLlmClient("second reply");
+    const app = createApp(llmClient, healthInfo, undefined, undefined, fakeScaffold());
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    await request(app).post("/api/chat").send({ projectId, message: "first message" });
+    await request(app).post("/api/chat").send({ projectId, message: "second message" });
+
+    const secondCallArgs = llmClient.chat.mock.calls[1][0] as ChatCompletionRequest;
+    for (const message of secondCallArgs.messages) {
+      expect(message).not.toHaveProperty("createdAt");
+    }
+  });
+
+  it("GET /api/projects/:id/messages includes a createdAt per message (feature #23)", async () => {
+    const app = createApp(fakeLlmClient("pong"), healthInfo, undefined, undefined, fakeScaffold());
+    const created = await request(app).post("/api/projects").send({ name: "GearShare" });
+    const projectId = created.body.project.id;
+
+    await request(app).post("/api/chat").send({ projectId, message: "ping" });
+    const history = await request(app).get(`/api/projects/${projectId}/messages`);
+
+    expect(history.body.messages).toHaveLength(2);
+    for (const message of history.body.messages) {
+      expect(typeof message.createdAt).toBe("string");
+      expect(new Date(message.createdAt).toString()).not.toBe("Invalid Date");
+    }
   });
 });
 
@@ -1107,6 +1141,7 @@ describe("defaultRunIntakePhase", () => {
         features: "## Current state\n\nA Task resource.",
         architecture: "Rails + Expo.",
         backlog: "| 1 | Initial build | done | | |",
+        inProgressDesignDocs: [],
       },
       onCallStart: vi.fn(),
       onUsage: vi.fn(),
@@ -1313,6 +1348,29 @@ describe("filterHistoryForIntake", () => {
       { role: "assistant", content: "[build:failed] Build failed: GLM request timed out after 60000ms" },
     ]);
   });
+
+  it("also strips the store's createdAt, which the LLM should never see (feature #23)", () => {
+    const history = [{ role: "user" as const, content: "hi", createdAt: "2026-09-04T10:00:00.000Z" }];
+    expect(filterHistoryForIntake(history)).toEqual([{ role: "user", content: "hi" }]);
+  });
+});
+
+describe("stripTimestamps (feature #23)", () => {
+  it("removes createdAt from every message, leaving everything else untouched", () => {
+    const history = [
+      { role: "user" as const, content: "hi", createdAt: "2026-09-04T10:00:00.000Z" },
+      { role: "assistant" as const, content: "hello", createdAt: "2026-09-04T10:00:01.000Z" },
+    ];
+    expect(stripTimestamps(history)).toEqual([
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" },
+    ]);
+  });
+
+  it("is a no-op for messages that never had createdAt", () => {
+    const history = [{ role: "user" as const, content: "hi" }];
+    expect(stripTimestamps(history)).toEqual(history);
+  });
 });
 
 describe("slugify", () => {
@@ -1382,10 +1440,106 @@ describe("readExistingProjectContext", () => {
         features: "## Current state\n\nA Task resource.",
         architecture: "Rails + Expo.",
         backlog: "| 1 | Initial build | building | | |",
+        inProgressDesignDocs: [],
       });
     } finally {
       await rm(workspacePath, { recursive: true, force: true });
     }
+  });
+
+  it("also reads the design doc for a backlog row not yet done/fixed (bug #19)", async () => {
+    workspacePath = await mkdtemp(path.join(tmpdir(), "orchestrator-context-test-"));
+    try {
+      await withDocs();
+      await mkdir(path.join(workspacePath, "docs/designs"), { recursive: true });
+      await writeFile(path.join(workspacePath, "docs/blueprints/features.md"), "## Current state\n\nVoice notes.");
+      await writeFile(path.join(workspacePath, "docs/blueprints/architecture.md"), "Rails + Expo.");
+      await writeFile(
+        path.join(workspacePath, "docs/backlog.md"),
+        "| 1 | Voice Notes | building | high | [voice-notes.md](../designs/voice-notes.md) |\n" +
+          "| 1 | Auth | fixed | high | [auth.md](../designs/auth.md) |",
+      );
+      await writeFile(
+        path.join(workspacePath, "docs/designs/voice-notes.md"),
+        "## Outcome\n\nBackend passing. Left: frontend wiring.",
+      );
+      await writeFile(path.join(workspacePath, "docs/designs/auth.md"), "## Outcome\n\nDone.");
+
+      const context = await readExistingProjectContext(workspacePath);
+
+      // Only the not-yet-done/fixed row's design doc is included.
+      expect(context?.inProgressDesignDocs).toEqual([
+        { slug: "voice-notes", content: "## Outcome\n\nBackend passing. Left: frontend wiring." },
+      ]);
+    } finally {
+      await rm(workspacePath, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("parseInProgressDesignDocSlugs", () => {
+  it("extracts slugs only from rows whose status isn't done/fixed", () => {
+    const backlog = [
+      "| # | Feature | Status | Priority | Design doc |",
+      "|---|---------|--------|----------|------------|",
+      "| 1 | Voice Notes | building | high | [voice-notes.md](../designs/voice-notes.md) |",
+      "| 2 | Auth | done | high | [auth.md](../designs/auth.md) |",
+      "| 3 | Reminders | proposed | — | — |",
+    ].join("\n");
+    expect(parseInProgressDesignDocSlugs(backlog)).toEqual(["voice-notes"]);
+  });
+
+  it("dedupes when the same slug appears in both Feature requests and Bugs tables", () => {
+    const backlog = [
+      "| 1 | Voice Notes | building | high | [voice-notes.md](../designs/voice-notes.md) |",
+      "| 1 | Playback bug | fixing | high | [voice-notes.md](../designs/voice-notes.md) |",
+    ].join("\n");
+    expect(parseInProgressDesignDocSlugs(backlog)).toEqual(["voice-notes"]);
+  });
+
+  it("returns an empty list for an empty or design-doc-less backlog", () => {
+    expect(parseInProgressDesignDocSlugs("")).toEqual([]);
+    expect(parseInProgressDesignDocSlugs("| 1 | Task | building | | — |")).toEqual([]);
+  });
+});
+
+describe("parsePlanScope (feature #22)", () => {
+  it("extracts backend-only/frontend-only/both, case-insensitively", () => {
+    expect(parsePlanScope("## Plan\n\nScope: backend-only\n\n...")).toBe("backend-only");
+    expect(parsePlanScope("## Plan\n\nScope: FRONTEND-ONLY\n\n...")).toBe("frontend-only");
+    expect(parsePlanScope("## Plan\n\nScope: both\n\n...")).toBe("both");
+  });
+
+  it("defaults to \"both\" when the Scope line is missing or unparseable", () => {
+    expect(parsePlanScope("")).toBe("both");
+    expect(parsePlanScope("## Plan\n\nno scope line here\n")).toBe("both");
+    expect(parsePlanScope("Scope: something-else\n")).toBe("both");
+  });
+});
+
+describe("mergeDesignDoc (feature #22)", () => {
+  it("replaces the entry for the given slug, leaving others untouched", () => {
+    const docs = [
+      { slug: "voice-notes", content: "old content" },
+      { slug: "auth", content: "auth content" },
+    ];
+    expect(mergeDesignDoc(docs, "voice-notes", "new content")).toEqual([
+      { slug: "auth", content: "auth content" },
+      { slug: "voice-notes", content: "new content" },
+    ]);
+  });
+
+  it("appends when the slug isn't already present", () => {
+    const docs = [{ slug: "auth", content: "auth content" }];
+    expect(mergeDesignDoc(docs, "voice-notes", "new content")).toEqual([
+      { slug: "auth", content: "auth content" },
+      { slug: "voice-notes", content: "new content" },
+    ]);
+  });
+
+  it("is a no-op when the new content is empty (e.g. the plan doc failed to read back)", () => {
+    const docs = [{ slug: "voice-notes", content: "old content" }];
+    expect(mergeDesignDoc(docs, "voice-notes", "")).toEqual(docs);
   });
 });
 
@@ -1421,6 +1575,7 @@ describe("POST /api/chat — /build against an already-built project", () => {
             features: "## Current state\n\nA Task resource.",
             architecture: "Rails + Expo.",
             backlog: "| 1 | Initial build | done | | |",
+            inProgressDesignDocs: [],
           },
         }),
       );
@@ -1428,7 +1583,7 @@ describe("POST /api/chat — /build against an already-built project", () => {
       await request(app).post("/api/chat").send({ projectId, message: "/proceed" });
 
       expect(runCodegenPhase).toHaveBeenCalledWith(
-        expect.objectContaining({ featureSlug: "add-reminders", isIncremental: true }),
+        expect.objectContaining({ featureSlug: "add-reminders", isIncremental: true, inProgressDesignDocs: [] }),
       );
     } finally {
       await rm(workspacePath, { recursive: true, force: true });

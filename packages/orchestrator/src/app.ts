@@ -12,6 +12,7 @@ import {
 import {
   buildFeatureWorkflowInstructions,
   buildFrontendSystemPrompt,
+  buildPlanningSystemPrompt,
   buildSystemPrompt as buildCodegenSystemPrompt,
   createDockerRunner,
   createFileTools,
@@ -20,11 +21,13 @@ import {
   runCodegenAgent,
   runCodegenLoop,
   PROJECT_DOCS_TOOL_DEFINITIONS,
+  PLANNING_TOOL_DEFINITIONS,
   type AgentEvent,
   type DockerRunner,
   type FeatureWorkflowContext,
   type FileTools,
   type ProjectDocsTools,
+  type RunCodegenAgentResult,
 } from "@app-builder/codegen-agent";
 import { runDebugAgent, type LiveComponent } from "@app-builder/debug-agent";
 import { createRunAgent, type ComponentResult, type RunAgent } from "@app-builder/run-agent";
@@ -85,8 +88,18 @@ export function isNoisyProgressMessage(message: ChatMessage): boolean {
  * something said in an earlier plain-chat turn instead of only the exact
  * text after `/build` — see docs/backlog.md bug #17.
  */
+/**
+ * Strips the read-only `createdAt` a chat store stamps onto every message
+ * (feature #23) before that history is used to build an LLM request —
+ * `createdAt` is for the web UI's `GET /api/projects/:id/messages`
+ * response only, never meant to reach the model.
+ */
+export function stripTimestamps(history: ChatMessage[]): ChatMessage[] {
+  return history.map(({ createdAt: _createdAt, ...message }) => message);
+}
+
 export function filterHistoryForIntake(history: ChatMessage[]): ChatMessage[] {
-  return history.filter((message) => !isNoisyProgressMessage(message));
+  return stripTimestamps(history.filter((message) => !isNoisyProgressMessage(message)));
 }
 
 export type IntakeOutcome = { kind: "question" | "spec"; content: string };
@@ -103,6 +116,7 @@ interface PendingBuild {
   spec: string;
   featureSlug: string;
   isIncremental: boolean;
+  inProgressDesignDocs: { slug: string; content: string }[];
 }
 
 const SCAFFOLD_STUB_MARKER = "Nothing built yet beyond the initial structural skeleton";
@@ -124,7 +138,74 @@ export async function readExistingProjectContext(workspacePath: string): Promise
     readFile(path.join(workspacePath, "docs/blueprints/architecture.md"), "utf8").catch(() => ""),
     readFile(path.join(workspacePath, "docs/backlog.md"), "utf8").catch(() => ""),
   ]);
-  return { features, architecture, backlog };
+  const inProgressDesignDocs = await readInProgressDesignDocs(workspacePath, backlog);
+  return { features, architecture, backlog, inProgressDesignDocs };
+}
+
+/**
+ * Scans a project's own docs/backlog.md table rows (Feature requests and
+ * Bugs share the same `| # | ... | Status | Priority | Design doc |`
+ * shape) for any row not yet `done`/`fixed`, and extracts the design-doc
+ * slug from its last column's markdown link, if any. See
+ * docs/designs/build-context-and-resume.md.
+ */
+export function parseInProgressDesignDocSlugs(backlog: string): string[] {
+  const slugs = new Set<string>();
+  for (const line of backlog.split("\n")) {
+    if (!line.trimStart().startsWith("|")) continue;
+    const cells = line.split("|").map((cell) => cell.trim());
+    if (!/^\d+$/.test(cells[1] ?? "")) continue; // not a numbered data row
+    const status = (cells[3] ?? "").toLowerCase();
+    if (status === "done" || status === "fixed") continue;
+    const match = (cells[5] ?? "").match(/designs\/([a-z0-9-]+)\.md/i);
+    if (match) slugs.add(match[1]);
+  }
+  return [...slugs];
+}
+
+async function readInProgressDesignDocs(
+  workspacePath: string,
+  backlog: string,
+): Promise<{ slug: string; content: string }[]> {
+  const slugs = parseInProgressDesignDocSlugs(backlog);
+  const docs = await Promise.all(
+    slugs.map(async (slug) => {
+      const content = await readFile(path.join(workspacePath, "docs/designs", `${slug}.md`), "utf8").catch(() => "");
+      return content ? { slug, content } : undefined;
+    }),
+  );
+  return docs.filter((doc): doc is { slug: string; content: string } => doc !== undefined);
+}
+
+const SCOPE_LINE_PATTERN = /^Scope:\s*(backend-only|frontend-only|both)\s*$/im;
+
+/**
+ * Parses the planning stage's "Scope:" line from a design doc (feature
+ * #22 — see docs/designs/planning-stage.md). Defaults to "both" when
+ * missing/unparseable (e.g. planning itself failed) — never guesses
+ * wrong and skips real work.
+ */
+export function parsePlanScope(designDoc: string): "backend-only" | "frontend-only" | "both" {
+  const match = designDoc.match(SCOPE_LINE_PATTERN);
+  const scope = match?.[1]?.toLowerCase();
+  return scope === "backend-only" || scope === "frontend-only" ? scope : "both";
+}
+
+/**
+ * Replaces (or appends) the entry for `featureSlug` in an
+ * inProgressDesignDocs list — used to refresh a coding phase's context
+ * with the plan the planning stage just wrote in THIS run, rather than
+ * the pre-run snapshot captured before planning started. See
+ * docs/designs/planning-stage.md.
+ */
+export function mergeDesignDoc(
+  docs: { slug: string; content: string }[],
+  featureSlug: string,
+  content: string,
+): { slug: string; content: string }[] {
+  if (!content) return docs;
+  const withoutSlug = docs.filter((d) => d.slug !== featureSlug);
+  return [...withoutSlug, { slug: featureSlug, content }];
 }
 
 const FEATURE_TITLE_PATTERN = /^#\s+(.+)$/m;
@@ -184,6 +265,8 @@ export type RunCodegenPhase = (params: {
   /** kebab-case, shared by both phases — see docs/designs/intake-iteration.md. */
   featureSlug: string;
   isIncremental: boolean;
+  /** See docs/designs/build-context-and-resume.md. */
+  inProgressDesignDocs: { slug: string; content: string }[];
   llmClient: LLMClient;
   runAgent: RunAgent;
   onProgress: (content: string) => void;
@@ -290,6 +373,12 @@ async function runFeatureWorkflowEpilogue(params: {
   dockerRunner: DockerRunner;
   projectDocsTools: ProjectDocsTools;
   featureWorkflow: FeatureWorkflowContext;
+  /**
+   * Which phase this epilogue is running for — see bug #21. Undefined
+   * for the planning stage itself (feature #22): it can reach both
+   * sides, so the "your tools only reach X" framing doesn't apply.
+   */
+  side?: "backend" | "frontend";
   onEvent: (event: AgentEvent) => void;
 }): Promise<void> {
   const systemPrompt = [
@@ -301,7 +390,7 @@ async function runFeatureWorkflowEpilogue(params: {
       "four docs it names (design doc, backlog.md, features.md, " +
       "CHANGELOG.md); don't spend your whole budget perfecting the " +
       "first one and skip the rest.",
-    buildFeatureWorkflowInstructions(params.featureWorkflow),
+    buildFeatureWorkflowInstructions(params.featureWorkflow, params.side),
     `What was requested:\n\n${params.buildSpec}`,
     `What actually happened (the authoritative result — trust this over ` +
       `anything you may have believed mid-build):\n\n${params.outcomeSummary}`,
@@ -339,6 +428,7 @@ export const defaultRunCodegenPhase: RunCodegenPhase = async ({
   buildSpec,
   featureSlug,
   isIncremental,
+  inProgressDesignDocs,
   llmClient,
   runAgent,
   onProgress,
@@ -356,46 +446,122 @@ export const defaultRunCodegenPhase: RunCodegenPhase = async ({
   // See docs/designs/intake-iteration.md — both phases share these so
   // whichever one runs last (or both, in an incremental run) leaves one
   // coherent record, not two conflicting ones.
-  const featureWorkflow: FeatureWorkflowContext = { featureSlug, isIncremental };
+  const featureWorkflow: FeatureWorkflowContext = { featureSlug, isIncremental, inProgressDesignDocs };
   const projectDocsTools = createProjectDocsTools(workspacePath);
 
   const backendDocker = createDockerRunner(workspacePath, "rails");
   const frontendDocker = createDockerRunner(workspacePath, "frontend");
   const backendFileTools = createFileTools(path.join(workspacePath, "backend"));
   const frontendFileTools = createFileTools(path.join(workspacePath, "frontend"));
+  // Project-root-scoped, like the Debug Agent's — only used by the
+  // planning stage below, which needs to see both sides at once. See
+  // docs/designs/planning-stage.md.
+  const projectFileTools = createFileTools(workspacePath);
   // Only torn down if the Run Agent didn't leave a live instance behind —
   // see the `finally` block below.
   let instanceIsLive = false;
+  // Which phase the exception-path epilogue's tools/side should match —
+  // see docs/designs/build-context-and-resume.md and
+  // docs/designs/planning-stage.md. Starts at "planning" only when a
+  // planning pass will actually run (isIncremental); a fresh build skips
+  // straight to "backend".
+  let currentPhase: "planning" | "backend" | "frontend" = isIncremental ? "planning" : "backend";
+  // Refreshed after planning to include the plan it just wrote, and
+  // reused by the exception-path epilogue below if a later phase throws.
+  let effectiveFeatureWorkflow: FeatureWorkflowContext = featureWorkflow;
+  let scope: "backend-only" | "frontend-only" | "both" = "both";
 
   try {
-    const backendResult = await runCodegenAgent({
-      llmClient: wrappedClient,
-      systemPrompt: await buildCodegenSystemPrompt(undefined, featureWorkflow),
-      buildSpec,
-      fileTools: backendFileTools,
-      dockerRunner: backendDocker,
-      projectDocsTools,
-      onEvent: forward,
-    });
-
-    if (!backendResult.testsPassed) {
-      await runFeatureWorkflowEpilogue({
+    // Planning stage (feature #22): only for incremental builds — a
+    // from-scratch project always needs both sides in the sequence
+    // below and has nothing yet to scope out. Bounded and read-only
+    // (write_file/run_command aren't offered), it decides which side(s)
+    // need work and writes a concrete, file-level plan into the design
+    // doc before any code gets touched. See
+    // docs/designs/planning-stage.md.
+    if (isIncremental) {
+      await runCodegenLoop({
         llmClient: wrappedClient,
+        systemPrompt: buildPlanningSystemPrompt(),
         buildSpec,
-        outcomeSummary: `Backend build finished but tests did not pass after ${backendResult.iterations} iteration(s) (converged: ${backendResult.converged}): ${backendResult.verifySummary}`,
+        fileTools: projectFileTools,
+        dockerRunner: backendDocker,
+        projectDocsTools,
+        toolDefinitions: PLANNING_TOOL_DEFINITIONS,
+        maxIterations: 20,
+        onEvent: forward,
+      });
+      const planDoc = await readFile(
+        path.join(workspacePath, "docs/designs", `${featureSlug}.md`),
+        "utf8",
+      ).catch(() => "");
+      scope = parsePlanScope(planDoc);
+      effectiveFeatureWorkflow = {
+        ...featureWorkflow,
+        inProgressDesignDocs: mergeDesignDoc(inProgressDesignDocs, featureSlug, planDoc),
+      };
+      onProgress(
+        scope === "both"
+          ? "Plan: both sides need work. Starting the backend..."
+          : `Plan: ${scope}. Skipping the ${scope === "backend-only" ? "frontend" : "backend"} phase — nothing for it to do.`,
+      );
+    }
+    currentPhase = "backend";
+
+    let backendResult: RunCodegenAgentResult | undefined;
+    if (scope !== "frontend-only") {
+      backendResult = await runCodegenAgent({
+        llmClient: wrappedClient,
+        systemPrompt: await buildCodegenSystemPrompt(undefined, effectiveFeatureWorkflow),
+        buildSpec,
         fileTools: backendFileTools,
         dockerRunner: backendDocker,
         projectDocsTools,
-        featureWorkflow,
         onEvent: forward,
       });
-      return {
-        kind: "failed",
-        content: `Backend build finished but tests did not pass after ${backendResult.iterations} iteration(s): ${backendResult.verifySummary}`,
-      };
+
+      if (!backendResult.testsPassed) {
+        await runFeatureWorkflowEpilogue({
+          llmClient: wrappedClient,
+          buildSpec,
+          outcomeSummary: `Backend build finished but tests did not pass after ${backendResult.iterations} iteration(s) (converged: ${backendResult.converged}): ${backendResult.verifySummary}`,
+          fileTools: backendFileTools,
+          dockerRunner: backendDocker,
+          projectDocsTools,
+          featureWorkflow: effectiveFeatureWorkflow,
+          side: "backend",
+          onEvent: forward,
+        });
+        return {
+          kind: "failed",
+          content: `Backend build finished but tests did not pass after ${backendResult.iterations} iteration(s): ${backendResult.verifySummary}`,
+        };
+      }
+
+      onProgress(
+        `Backend complete — ${backendResult.verifySummary}.` + (scope === "backend-only" ? "" : " Starting the frontend..."),
+      );
     }
 
-    onProgress(`Backend complete — ${backendResult.verifySummary}. Starting the frontend...`);
+    currentPhase = "frontend";
+
+    if (scope === "backend-only") {
+      // The plan says nothing's needed on the frontend — bring the app
+      // live (still worth doing after a backend-only change) and report
+      // done without invoking a frontend phase that has nothing to do.
+      onRunOutcome({ kind: "pending" });
+      const startResult = await runAgent.start({ workspacePath });
+      if (startResult.status === "live") {
+        instanceIsLive = true;
+        onRunOutcome({ kind: "live", components: startResult.components });
+      } else {
+        onRunOutcome({ kind: "failed", error: startResult.error ?? "Unknown error starting your app." });
+      }
+      return {
+        kind: "done",
+        content: `Build complete — backend: ${backendResult!.verifySummary}; frontend: unchanged (plan: backend-only).`,
+      };
+    }
 
     // The loop (writes code) is split from the final verify command
     // (below) — once the app is written, verifying it and running it
@@ -403,7 +569,7 @@ export const defaultRunCodegenPhase: RunCodegenPhase = async ({
     // docs/designs/run-deploy-agent.md.
     const loopResult = await runCodegenLoop({
       llmClient: wrappedClient,
-      systemPrompt: await buildFrontendSystemPrompt(undefined, featureWorkflow),
+      systemPrompt: await buildFrontendSystemPrompt(undefined, effectiveFeatureWorkflow),
       buildSpec,
       fileTools: frontendFileTools,
       dockerRunner: frontendDocker,
@@ -440,7 +606,7 @@ export const defaultRunCodegenPhase: RunCodegenPhase = async ({
     if (verification.exitCode === 0) {
       return {
         kind: "done",
-        content: `Build complete — backend: ${backendResult.verifySummary}; frontend: ${verifySummary}`,
+        content: `Build complete — backend: ${backendResult?.verifySummary ?? "unchanged (plan: frontend-only)"}; frontend: ${verifySummary}`,
       };
     }
 
@@ -448,12 +614,13 @@ export const defaultRunCodegenPhase: RunCodegenPhase = async ({
       llmClient: wrappedClient,
       buildSpec,
       outcomeSummary:
-        `Backend: ${backendResult.verifySummary}. Frontend build finished but tests did not pass ` +
+        `Backend: ${backendResult?.verifySummary ?? "unchanged (plan: frontend-only)"}. Frontend build finished but tests did not pass ` +
         `after ${loopResult.iterations} iteration(s) (converged: ${loopResult.converged}): ${verifySummary}`,
       fileTools: frontendFileTools,
       dockerRunner: frontendDocker,
       projectDocsTools,
-      featureWorkflow,
+      featureWorkflow: effectiveFeatureWorkflow,
+      side: "frontend",
       onEvent: forward,
     });
     return {
@@ -461,9 +628,31 @@ export const defaultRunCodegenPhase: RunCodegenPhase = async ({
       content: `Frontend build finished but tests did not pass after ${loopResult.iterations} iteration(s): ${verifySummary}`,
     };
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // Unlike the two test-failure branches above, this path used to skip
+    // the epilogue entirely — a provider timeout/rate-limit mid-loop left
+    // features.md/backlog.md/CHANGELOG.md stale even though real code may
+    // already be on disk. See docs/designs/build-context-and-resume.md.
+    const { fileTools, dockerRunner } =
+      currentPhase === "backend"
+        ? { fileTools: backendFileTools, dockerRunner: backendDocker }
+        : currentPhase === "frontend"
+          ? { fileTools: frontendFileTools, dockerRunner: frontendDocker }
+          : { fileTools: projectFileTools, dockerRunner: backendDocker };
+    await runFeatureWorkflowEpilogue({
+      llmClient: wrappedClient,
+      buildSpec,
+      outcomeSummary: `Build stopped by an unexpected error during the ${currentPhase} phase: ${message}`,
+      fileTools,
+      dockerRunner,
+      projectDocsTools,
+      featureWorkflow: effectiveFeatureWorkflow,
+      side: currentPhase === "planning" ? undefined : currentPhase,
+      onEvent: forward,
+    });
     return {
       kind: "failed",
-      content: `Build failed: ${error instanceof Error ? error.message : String(error)}`,
+      content: `Build failed: ${message}`,
     };
   } finally {
     // docker compose down tears down the whole stack — but if the Run
@@ -737,6 +926,7 @@ export function createApp(
             spec: intakeResult.content,
             featureSlug: deriveFeatureSlug(intakeResult.content),
             isIncremental: existingContext !== undefined,
+            inProgressDesignDocs: existingContext?.inProgressDesignDocs ?? [],
           });
         }
 
@@ -793,6 +983,7 @@ export function createApp(
         buildSpec: pending.spec,
         featureSlug: pending.featureSlug,
         isIncremental: pending.isIncremental,
+        inProgressDesignDocs: pending.inProgressDesignDocs,
         llmClient,
         runAgent,
         onProgress: (content) => {
@@ -997,7 +1188,7 @@ export function createApp(
       return;
     }
 
-    const history = await chatStore.get(projectId);
+    const history = stripTimestamps(await chatStore.get(projectId));
 
     try {
       const result = await llmClient.chat({

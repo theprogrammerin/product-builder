@@ -23,7 +23,9 @@ export function createInMemoryStore(): ChatSessionStore {
     },
     async append(projectId, messages) {
       const existing = sessions.get(projectId) ?? [];
-      sessions.set(projectId, [...existing, ...messages]);
+      // Stamped here, not by callers — see ChatMessage.createdAt (feature #23).
+      const stamped = messages.map((message) => ({ ...message, createdAt: new Date().toISOString() }));
+      sessions.set(projectId, [...existing, ...stamped]);
     },
   };
 }

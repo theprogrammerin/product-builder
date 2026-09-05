@@ -28,6 +28,16 @@ renders as a normal `.chat-message` bubble. Fixed as bug #16 — these were
 originally full-size bubbles, which felt too heavy for what's really just
 a running activity log.
 
+A full bubble also shows `message.createdAt` (feature #23) via
+`formatMessageTime()`, styled `.chat-message__time` — small, muted, and
+text-aligned to match the bubble's own side (`--user` right,
+`--assistant`/`--error` left). `toDisplayMessages()` carries the server's
+real `createdAt` through for loaded history; `appendMessage()` stamps a
+client-side one for the optimistic echo of a message just sent, an
+assistant reply, or an error, only when the caller didn't already supply
+one. Tool-call lines don't get a timestamp — they're log lines, not
+conversational turns.
+
 ## State
 
 - Plain React `useState` — no state-management library. One page, kept

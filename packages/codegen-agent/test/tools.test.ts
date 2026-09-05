@@ -2,7 +2,14 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { PathEscapeError, createFileTools, createProjectDocsTools, isProjectDocPath, resolveScoped } from "../src/tools.js";
+import {
+  PLANNING_TOOL_DEFINITIONS,
+  PathEscapeError,
+  createFileTools,
+  createProjectDocsTools,
+  isProjectDocPath,
+  resolveScoped,
+} from "../src/tools.js";
 
 let root: string;
 
@@ -142,5 +149,16 @@ describe("createProjectDocsTools", () => {
     const tools = createProjectDocsTools(root);
     await expect(tools.read("backend/app/models/task.rb")).rejects.toThrow("Not a project doc path");
     await expect(tools.write("backend/app/models/task.rb", "x")).rejects.toThrow("Not a project doc path");
+  });
+});
+
+describe("PLANNING_TOOL_DEFINITIONS (feature #22)", () => {
+  it("offers read/explore and project-doc tools, but never write_file or run_command", () => {
+    const names = PLANNING_TOOL_DEFINITIONS.map((t) => t.function.name);
+    expect(names).toEqual(
+      expect.arrayContaining(["read_file", "list_dir", "list_files", "search_files", "read_project_doc", "write_project_doc"]),
+    );
+    expect(names).not.toContain("write_file");
+    expect(names).not.toContain("run_command");
   });
 });

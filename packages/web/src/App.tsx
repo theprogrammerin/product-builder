@@ -30,11 +30,14 @@ interface Project {
 interface Message {
   role: "user" | "assistant" | "error";
   content: string;
+  /** ISO 8601. Stamped by appendMessage() if the caller doesn't supply one — see feature #23. */
+  createdAt?: string;
 }
 
 interface ServerMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string | null;
+  createdAt?: string;
 }
 
 interface ProgressSnapshot {
@@ -112,7 +115,15 @@ function hasPendingWork(messages: Message[]): boolean {
 function toDisplayMessages(serverMessages: ServerMessage[]): Message[] {
   return serverMessages
     .filter((m) => m.role === "user" || m.role === "assistant")
-    .map((m) => ({ role: m.role as "user" | "assistant", content: m.content ?? "" }));
+    .map((m) => ({ role: m.role as "user" | "assistant", content: m.content ?? "", createdAt: m.createdAt }));
+}
+
+/** e.g. "3:45 PM" in the viewer's own locale/timezone. */
+function formatMessageTime(createdAt: string | undefined): string {
+  if (!createdAt) return "";
+  const date = new Date(createdAt);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
 function App() {
@@ -276,9 +287,14 @@ function App() {
   }, [messages, isSending]);
 
   function appendMessage(projectId: string, message: Message) {
+    // Stamped here (not by each call site) for a locally-originated
+    // message (the optimistic user echo, an assistant reply, an error) —
+    // a message loaded from the server already carries its own real
+    // createdAt from toDisplayMessages(). See feature #23.
+    const stamped = message.createdAt ? message : { ...message, createdAt: new Date().toISOString() };
     setMessagesByProject((prev) => ({
       ...prev,
-      [projectId]: [...(prev[projectId] ?? []), message],
+      [projectId]: [...(prev[projectId] ?? []), stamped],
     }));
   }
 
@@ -451,7 +467,21 @@ function App() {
               {selectedProject.workspacePath}
             </code>
           )}
+
+          {selectedProject && !isCreatingProject && messages.length > 0 && (
+            <button type="button" className="print-button no-print" onClick={() => window.print()}>
+              Print
+            </button>
+          )}
         </div>
+
+        {selectedProject && (
+          <div className="print-only">
+            <h2>{selectedProject.name}</h2>
+            <p>{selectedProject.workspacePath}</p>
+            <p>Printed {new Date().toLocaleString()}</p>
+          </div>
+        )}
 
         {isCreatingProject && (
           <form className="new-project-form" onSubmit={handleCreateProject}>
@@ -514,6 +544,7 @@ function App() {
               </div>
             );
           }
+          const time = formatMessageTime(message.createdAt);
           return (
             <div key={index} className={`chat-message chat-message--${message.role}`}>
               <span className="chat-message__role">
@@ -524,6 +555,7 @@ function App() {
                     : "Error"}
               </span>
               <p>{message.content}</p>
+              {time && <span className="chat-message__time">{time}</span>}
             </div>
           );
         })}

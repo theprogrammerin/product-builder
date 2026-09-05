@@ -7,7 +7,7 @@ import {
   type CommandResult,
 } from "@app-builder/codegen-agent";
 import { assembleInitialContext, type LiveComponent } from "./context.js";
-import { buildDebugSystemPrompt } from "./promptContext.js";
+import { buildDebugLoggingPrompt, buildDebugSystemPrompt } from "./promptContext.js";
 import { buildDebugToolDefinitions } from "./toolDefinitions.js";
 
 export type { LiveComponent } from "./context.js";
@@ -53,6 +53,38 @@ function summarizeFinal(command: string, result: CommandResult): { summary: stri
 }
 
 /**
+ * Safety net mirroring codegen-agent's runFeatureWorkflowEpilogue —
+ * forces the bug-row log write regardless of whether the two main passes
+ * above converged, failed, or threw. Best-effort: a failure here doesn't
+ * change the debug run's own reported outcome. See
+ * docs/designs/build-context-and-resume.md.
+ */
+async function runDebugLoggingEpilogue(params: {
+  runCodegenLoopFn: typeof runCodegenLoop;
+  llmClient: LLMClient;
+  description: string | undefined;
+  outcomeSummary: string;
+  fileTools: ReturnType<typeof createFileTools>;
+  dockerRunner: ReturnType<typeof createDockerRunner>;
+  onEvent?: (event: AgentEvent) => void;
+}): Promise<void> {
+  try {
+    await params.runCodegenLoopFn({
+      llmClient: params.llmClient,
+      systemPrompt: buildDebugLoggingPrompt(params.description, params.outcomeSummary),
+      buildSpec: params.description ?? "(general health check)",
+      fileTools: params.fileTools,
+      dockerRunner: params.dockerRunner,
+      toolDefinitions: buildDebugToolDefinitions("backend"),
+      maxIterations: 6,
+      onEvent: params.onEvent,
+    });
+  } catch {
+    // Best-effort — the debug run's own reported outcome is unaffected.
+  }
+}
+
+/**
  * Investigates an already-built project — a reported problem, or a
  * general sweep with no description — and fixes what it finds, in two
  * scoped passes (backend, then frontend) sharing the same diagnostic
@@ -75,6 +107,7 @@ export async function runDebugAgent(
   // codegen-agent's.
   const fileTools = d.createFileTools(workspacePath);
   const isLive = !!liveComponents && liveComponents.length > 0;
+  let outcomeSummary = "Debug run ended with no result captured.";
 
   try {
     const { contextText } = await d.assembleInitialContext({
@@ -111,12 +144,28 @@ export async function runDebugAgent(
     ]);
     const backend = summarizeFinal("bundle exec rspec", backendVerify);
     const frontend = summarizeFinal("npx jest", frontendVerify);
+    outcomeSummary = `Backend: ${backend.summary}; Frontend: ${frontend.summary}`;
 
     return {
       fixed: backend.passed && frontend.passed,
-      summary: `Backend: ${backend.summary}; Frontend: ${frontend.summary}`,
+      summary: outcomeSummary,
     };
+  } catch (error) {
+    outcomeSummary = `Debug run stopped by an unexpected error: ${error instanceof Error ? error.message : String(error)}`;
+    throw error;
   } finally {
+    // Forces the bug-row log write even if the passes above never
+    // reached a natural stop (bug #19) — best-effort, doesn't affect
+    // the outcome above.
+    await runDebugLoggingEpilogue({
+      runCodegenLoopFn: d.runCodegenLoop,
+      llmClient,
+      description,
+      outcomeSummary,
+      fileTools,
+      dockerRunner: backendDocker,
+      onEvent,
+    });
     // Never tear down containers the Run Agent is actively keeping live
     // for this project — same rule runCodegenPhase follows in the
     // orchestrator. See docs/designs/run-deploy-agent.md.

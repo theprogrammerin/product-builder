@@ -33,6 +33,15 @@ Create or select a project and track its stage through a fixed pipeline:
 - UI: project dropdown, "+ New project" inline form, stage selector, and
   the selected project's workspace directory (truncated, full path on
   hover) — [`App.tsx`](../../packages/web/src/App.tsx)
+- A "Print" button (shown once a project has messages) prints the *full*
+  transcript, not just what's currently scrolled into view — the chat
+  log's fixed-height/`overflow-y: auto` layout is un-constrained under
+  `@media print`, interactive chrome (dropdowns, input, Auto-refresh,
+  the token-usage footer) is hidden, and a plain light/ink-friendly
+  palette replaces the dark theme. A print-only header shows the project
+  name, workspace path, and print timestamp. Pure client-side — no
+  server changes, since a project's full history is already loaded
+  client-side once selected (feature #20).
 - Stage changes are manual today — nothing yet infers or advances a stage automatically.
 - The last-selected project is remembered across a page reload
   (`localStorage`, browser-scoped) — reloading reselects it instead of
@@ -125,6 +134,10 @@ conversation, including after an orchestrator restart or a page reload.
   it's turned back on or the page is reloaded. Both settings persist in
   the browser's `localStorage`. Design record:
   [`polling-toggle.md`](../designs/polling-toggle.md)
+- Each chat bubble shows a small, muted timestamp (bottom-right for your
+  own messages, bottom-left for the assistant's/errors) — from the
+  store's real `created_at` once persisted, or a client-side stamp for
+  the optimistic echo of a message you just sent (feature #23).
 
 ## `/build <description>` — real code generation from chat
 
@@ -159,19 +172,56 @@ quirk, and a typo along the way.
   duplicate what's already there. This applies regardless of whether the
   *previous* build's tests fully passed — a follow-up after a failed
   attempt still builds on whatever was genuinely there, not a rewrite.
-- **Every `/build` — fresh or incremental, passing or not — leaves a
-  real record** in the project's own `docs/`: a `docs/designs/<slug>.md`
-  with the plan and an honest outcome (what passed, what didn't, what's
+- **Every `/build` — fresh or incremental, passing, failing, or ending in
+  an unexpected error (a provider timeout/rate-limit) — leaves a real
+  record** in the project's own `docs/`: a `docs/designs/<slug>.md` with
+  the plan and an honest outcome (what passed, what didn't, what's
   left), a `docs/backlog.md` row, an updated `docs/blueprints/features.md`,
   and a `CHANGELOG.md` entry — the project follows its own mandatory
   Feature workflow for real (bug #16), the same discipline the Debug
-  Agent already applies to bugs.
+  Agent already applies to bugs. This now covers a thrown exception, not
+  just a failed test run (bug #19) — a provider hiccup no longer erases
+  the record of what was actually attempted.
+- **A follow-up `/build` — including a vague "continue" — targets what's
+  actually left** (bug #19): if the project has unfinished work, the
+  matching design doc(s)' Outcome sections (exactly what's done, what's
+  left) are included in both the Intake Agent's incremental prompt and
+  the Codegen Agent's starting context, so a continuation describes only
+  the remaining work instead of a generic clarifying question or a full
+  redescription, and Codegen doesn't have to re-explore/re-verify what's
+  already documented as passing. Each phase is also told its tools can't
+  reach the other side's code at all, and to stop with a quick
+  verification (not a repeated search) once the design doc shows nothing
+  is left on its own side — a regression this exact mechanism briefly
+  introduced (bug #20) before it was caught live and fixed. When
+  documenting work left for the other side, it's phrased as needing
+  that side's own phase build (e.g. "needs a frontend-phase build"),
+  never as permanently unreachable — a second regression (bug #21)
+  caught the very next run, where a doc-only recovery pass's summary
+  read as if the work could never be done, when really it just needed a
+  future run of the matching phase.
+- **An incremental build plans before it codes** (feature #22): before
+  touching any code, a bounded, read-only planning pass decides whether
+  backend, frontend, or both actually need work for this request, and
+  writes a concrete, file-level plan into the design doc. Whichever side
+  the plan says has nothing to do is **skipped entirely** — no wasted
+  phase invocation just to reach that conclusion. The phase(s) that do
+  run are told to execute the plan directly (open exactly the files it
+  names) rather than re-surveying the whole codebase, cutting the
+  30+-tool-call rediscovery seen on real runs down to opening the
+  specific files that need changing. Because the plan lives in the
+  design doc, it survives disruption too — an interrupted run's plan is
+  found and reused by the next attempt instead of being re-derived from
+  scratch. Fresh (from-scratch) builds are unaffected; planning only
+  runs in incremental mode.
 - **Known limitations**: no accounts, no real SSE/WebSocket streaming
   (HTTP polling stands in for this milestone), no delivery (git push/
   zip), and no durable job queue — an orchestrator restart mid-build
   loses that result.
 - Design record: [`wire-agents-into-chat.md`](../designs/wire-agents-into-chat.md),
-  [`intake-iteration.md`](../designs/intake-iteration.md)
+  [`intake-iteration.md`](../designs/intake-iteration.md),
+  [`build-context-and-resume.md`](../designs/build-context-and-resume.md),
+  [`planning-stage.md`](../designs/planning-stage.md)
 
 ## Per-agent token usage reporting
 
@@ -259,7 +309,13 @@ before reporting back:
 - Verified live 2026-09-03: a real backend bug (a dropped field in a
   controller's permitted params) was found, fixed, and logged correctly
   by a real LLM run — see design doc.
-- Design record: [`debug-agent.md`](../designs/debug-agent.md)
+- **A run that never reaches a natural stop still logs what happened**
+  (bug #19): a forced, bounded follow-up pass runs after the main
+  investigation regardless of whether it converged, failed its final
+  verification, or threw (a provider timeout, etc.) — the same
+  discipline `/build`'s epilogue already applies.
+- Design record: [`debug-agent.md`](../designs/debug-agent.md),
+  [`build-context-and-resume.md`](../designs/build-context-and-resume.md)
 
 ## Health check
 

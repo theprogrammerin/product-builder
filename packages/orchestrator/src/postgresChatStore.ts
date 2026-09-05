@@ -8,6 +8,7 @@ interface ChatMessageRow {
   tool_call_id: string | null;
   tool_name: string | null;
   tool_calls: string | null;
+  created_at: string | Date;
 }
 
 function toChatMessage(row: ChatMessageRow): ChatMessage {
@@ -17,6 +18,8 @@ function toChatMessage(row: ChatMessageRow): ChatMessage {
     ...(row.tool_call_id ? { toolCallId: row.tool_call_id } : {}),
     ...(row.tool_name ? { name: row.tool_name } : {}),
     ...(row.tool_calls ? { toolCalls: JSON.parse(row.tool_calls) as ToolCall[] } : {}),
+    // See ChatMessage.createdAt (feature #23) — read-only, for the web UI.
+    createdAt: new Date(row.created_at).toISOString(),
   };
 }
 

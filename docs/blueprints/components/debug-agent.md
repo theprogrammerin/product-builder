@@ -41,7 +41,16 @@ and running two scoped passes (backend, then frontend) instead. See
   re-verifies both sides for real, and skips teardown if the project is
   currently live (same rule `runCodegenPhase` follows for the Run Agent).
   Injectable deps (`RunDebugAgentDeps`) mirror `@app-builder/run-agent`'s
-  `createRunAgent(deps)` pattern for testability.
+  `createRunAgent(deps)` pattern for testability. A `try/catch/finally`
+  around the two passes + verification captures an `outcomeSummary`
+  (the real result, or a caught error's message) and always runs
+  `runDebugLoggingEpilogue()` in `finally` — a bounded, docs-only
+  follow-up `runCodegenLoop` call (`buildDebugLoggingPrompt()` in
+  `promptContext.ts`) that forces the `docs/backlog.md` log write even
+  when the main passes never reach a natural stop (bug #19). Best-effort:
+  its own failure doesn't change the run's reported outcome, and a
+  caught error is still rethrown after it runs. See
+  [build-context-and-resume.md](../../designs/build-context-and-resume.md).
 
 ## `fixed` means *both* sides pass, not just what was touched
 

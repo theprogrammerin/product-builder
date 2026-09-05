@@ -101,6 +101,15 @@ export interface ExistingProjectContext {
   features: string;
   architecture: string;
   backlog: string;
+  /**
+   * Design docs for any of this project's backlog rows not yet
+   * `done`/`fixed` — their Outcome sections are the authoritative record
+   * of exactly what's done and what's left, so a vague "continue" request
+   * can be turned into a targeted delta instead of a generic clarifying
+   * question or a full redescription. See
+   * docs/designs/build-context-and-resume.md.
+   */
+  inProgressDesignDocs: { slug: string; content: string }[];
 }
 
 /**
@@ -123,5 +132,17 @@ export function buildIncrementalSystemPrompt(existing: ExistingProjectContext): 
     `What already exists (this project's own docs/blueprints/features.md):\n\n${existing.features}`,
     `Current architecture (docs/blueprints/architecture.md):\n\n${existing.architecture}`,
     `Feature history, including anything still in progress (docs/backlog.md):\n\n${existing.backlog}`,
+    ...(existing.inProgressDesignDocs.length > 0
+      ? [
+          "In-progress design doc(s) — their Outcome sections are the " +
+            "authoritative record of exactly what's done and what's " +
+            "left. If this request is a continuation of one of these " +
+            "(including a vague 'continue' with no other detail), " +
+            "describe only what's still listed as left, reusing that " +
+            "feature's title exactly — do not restate what's already " +
+            "done:\n\n" +
+            existing.inProgressDesignDocs.map((d) => `### ${d.slug}\n\n${d.content}`).join("\n\n"),
+        ]
+      : []),
   ].join("\n\n");
 }

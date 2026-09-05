@@ -85,3 +85,35 @@ export async function buildDebugSystemPrompt(
       "what you claim.",
   ].join("\n\n");
 }
+
+/**
+ * Safety net mirroring codegen-agent's runFeatureWorkflowEpilogue: the
+ * regular debug prompt above only asks the model to log a bug row as
+ * part of reaching its own natural stop — a thrown error (provider
+ * timeout, etc.) or an exhausted iteration budget mid-fix can skip that
+ * entirely. This is a bounded, docs-only follow-up pass forcing the log
+ * write regardless of how the main passes ended. See
+ * docs/designs/build-context-and-resume.md.
+ */
+export function buildDebugLoggingPrompt(description: string | undefined, outcomeSummary: string): string {
+  return [
+    "This debug run just ended. Do NOT investigate or fix anything " +
+      "further — your ONLY job now is to make sure the outcome is " +
+      "logged. Read this project's own CLAUDE.md at the project root to " +
+      "confirm its Bug workflow, then read docs/backlog.md.",
+    "If you found and fixed a real issue during this run that isn't " +
+      'already reflected in docs/backlog.md\'s "Bugs" table, add or ' +
+      "update its row now (status `fixed` only if the outcome below says " +
+      "it's genuinely resolved; `reported`/`fixing` otherwise, with an " +
+      "honest note on what's left) — a small, self-contained fix goes " +
+      "straight to `fixed` with the design-doc column left blank; " +
+      "anything larger gets a docs/designs/<bug-slug>.md, copied from " +
+      "docs/designs/TEMPLATE.md. If nothing you found rises to a real, " +
+      "logged issue, do nothing and reply with plain text.",
+    `What was asked: ${description ?? "(general health check, no specific report)"}`,
+    `What actually happened (the authoritative result — trust this over ` +
+      `anything you may have believed mid-run):\n\n${outcomeSummary}`,
+    "Respond with plain text and no further tool calls once the log is " +
+      "accurate (or once you've confirmed nothing needs logging).",
+  ].join("\n\n");
+}

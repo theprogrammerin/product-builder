@@ -120,6 +120,47 @@ tools, told not to touch application code — writes the real outcome
 instead of leaving no record at all. See
 [intake-iteration.md](../../designs/intake-iteration.md).
 
+`defaultRunCodegenPhase`'s outer `catch (error)` now also calls
+`runFeatureWorkflowEpilogue()` before returning `kind: "failed"` (bug
+#19) — previously a thrown exception (a provider timeout/rate-limit, not
+a test failure) skipped it entirely, leaving the docs stale. A
+`currentPhase` flag (flipped to `"frontend"` once the backend result
+passes) picks which phase's `fileTools`/`dockerRunner` the epilogue
+reuses, since the exception could have come from either. See
+[build-context-and-resume.md](../../designs/build-context-and-resume.md).
+
+`readExistingProjectContext()` additionally scans `backlog.md`'s table
+rows (`parseInProgressDesignDocSlugs()`) for any not yet `done`/`fixed`,
+and reads each one's `docs/designs/<slug>.md` — this
+`inProgressDesignDocs: { slug, content }[]` list is threaded through
+`ExistingProjectContext` to Intake's incremental prompt, and through
+`PendingBuild`/`RunCodegenPhase`'s `FeatureWorkflowContext` to both
+Codegen phases' *starting* system prompt (not just the final
+"before you finish" step, which already read the matching doc but only
+at the very end). See
+[build-context-and-resume.md](../../designs/build-context-and-resume.md).
+
+### A planning stage scopes and skips phases (feature #22)
+
+`defaultRunCodegenPhase` gains a planning step, run only when
+`isIncremental`, before the backend/frontend sequence: a bounded
+`runCodegenLoop` call using `createFileTools(workspacePath)` (project
+root, like the Debug Agent — not scoped to `backend/`/`frontend/`, so it
+can see both sides) and `PLANNING_TOOL_DEFINITIONS`. After it completes,
+the orchestrator re-reads `docs/designs/<featureSlug>.md` off disk,
+parses a `Scope:` line via `parsePlanScope()` (defaulting to `"both"` if
+missing/unparseable — never skips real work on doubt), and conditionally
+skips the backend and/or frontend phase entirely. `mergeDesignDoc()`
+replaces the stale pre-run snapshot in `inProgressDesignDocs` with the
+plan the planning step just wrote, so the coding phase(s) that follow
+see *this run's* plan, not last run's. `currentPhase` (used by bug
+#19/#21's exception-path epilogue) gained a third state, `"planning"` —
+its epilogue call passes `side: undefined` since planning can reach
+both sides. When a phase is skipped, the final `"done"` message notes
+that side as "unchanged (plan: backend-only/frontend-only)" rather than
+fabricating a verification summary for a phase that never ran. See
+[planning-stage.md](../../designs/planning-stage.md).
+
 ### `/build` also sees prior chat, not just its own description (bug #17)
 
 Before calling Intake, `/build`'s handler fetches `chatStore.get(projectId)`
